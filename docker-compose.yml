@@ -1,0 +1,29 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: event_ticketing
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  user_service:
+    build: ./services/user-service
+    ports:
+      - "8081:8081"
+    depends_on:
+      - postgres
+
+  event-service:
+    image: alpine # placeholder until built
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

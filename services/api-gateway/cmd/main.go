@@ -2,10 +2,10 @@ package main
 
 import (
 	"log"
+	"net/http"
 
-	"github.com/alsung/event-ticketing-system/api-gateway/internal/handlers"
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
+	"github.com/alsung/event-ticketing-system/api-gateway/gateway/exported"
+	"github.com/alsung/event-ticketing-system/api-gateway/gateway/exported/middleware"
 	"github.com/joho/godotenv"
 )
 
@@ -14,13 +14,16 @@ func main() {
 		log.Fatal("Failed to load .env file")
 	}
 
-	router := gin.Default()
+	// Initialize Gateway through exported function (public API)
+	gatewayHandler := exported.NewGatewayHandler()
 
-	// CORS middleware
-	router.Use(cors.Default())
+	// Wrap the handler with JWT middleware
+	handlerWithMiddleware := middleware.JWTMiddleware(gatewayHandler)
 
-	// Setup API Gateway routes
-	handlers.RegisterGatewayRoutes(router)
+	http.Handle("/", handlerWithMiddleware)
 
-	router.Run(":8000")
+	log.Println("API Gateway running on :8000")
+	if err := http.ListenAndServe(":8000", nil); err != nil {
+		log.Fatal(err)
+	}
 }

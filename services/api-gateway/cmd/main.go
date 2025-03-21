@@ -4,8 +4,9 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/alsung/event-ticketing-system/api-gateway/gateway/exported"
-	"github.com/alsung/event-ticketing-system/api-gateway/gateway/exported/middleware"
+	"github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported"
+	"github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported/middleware"
+	sharedMiddleware "github.com/alsung/event-ticketing-system/services/pkg/middleware"
 	"github.com/joho/godotenv"
 )
 
@@ -19,6 +20,8 @@ func main() {
 
 	// Wrap the handler with JWT middleware
 	handlerWithMiddleware := middleware.JWTMiddleware(gatewayHandler)
+
+	handlerWithMiddleware = sharedMiddleware.Logging(handlerWithMiddleware)
 
 	http.Handle("/", handlerWithMiddleware)
 

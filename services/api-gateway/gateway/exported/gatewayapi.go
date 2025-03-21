@@ -3,7 +3,7 @@ package exported
 import (
 	"net/http"
 
-	"github.com/alsung/event-ticketing-system/api-gateway/gateway/internal"
+	"github.com/alsung/event-ticketing-system/services/api-gateway/gateway/internal"
 )
 
 // NewGatewayHandler creates a handler that proxies requests internally

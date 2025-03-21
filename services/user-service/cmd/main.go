@@ -2,9 +2,10 @@ package main
 
 import (
 	"log"
+	"net/http"
 
-	"github.com/alsung/event-ticketing-system/user-service/internal/handlers"
-	"github.com/gin-gonic/gin"
+	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/user-service/internal/handlers"
 	"github.com/joho/godotenv"
 )
 
@@ -13,10 +14,14 @@ func main() {
 		log.Fatal("Failed to load .env file")
 	}
 
-	router := gin.Default()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/register", handlers.RegisterUser)
+	mux.HandleFunc("/login", handlers.LoginUser)
 
-	router.POST("/register", handlers.RegisterUser)
-	router.POST("/login", handlers.LoginUser)
+	handlerWithMiddleware := middleware.Logging(mux)
 
-	router.Run(":8081")
+	log.Println("User Service running on :8081")
+	if err := http.ListenAndServe(":8081", handlerWithMiddleware); err != nil {
+		log.Fatal(err)
+	}
 }

@@ -2,26 +2,65 @@ version: '3.9'
 
 services:
   postgres:
-    image: postgres:15
     container_name: postgres_db
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: event_ticketing
+    image: postgres:15
     ports:
       - "5433:5432"
+    environment:
+      POSTGRES_DB: event_ticketing
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   user_service:
-    build: ./services/user-service
+    build: 
+      context: ./services/user-service
+      dockerfile: Dockerfile
     ports:
       - "8081:8081"
+    environment:
+      - DB_URL=postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
+      - JWT_SECRET=my_secret_key_123
     depends_on:
       - postgres
 
   event-service:
+    build:
+      context: ./services/event-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_URL=postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
+      - JWT_SECRET=my_secret_key_123
     image: alpine # placeholder until built
+    depends_on:
+      - postgres
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - USER_SERVICE_URL=http://user-service:8081
+      - EVENT_SERVICE_URL=http://event-service:8082
+      - JWT_SECRET=my_secret_key_123
+    depends_on:
+      - user_service
+      - event-service
+
+  ticket-service:
+    build:
+      context: ./services/ticket-service
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - DB_URL=postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
+      - JWT_SECRET=my_secret_key_123
     depends_on:
       - postgres
 

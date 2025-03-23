@@ -1,0 +1,2 @@
+ALTER TABLE tickets ADD COLUMN price DECIMAL(10, 2) NOT NULL DEFAULT 0.00;
+CREATE INDEX IF NOT EXISTS idx_event_id ON tickets(event_id);

@@ -1,0 +1,2 @@
+ALTER TABLE tickets DROP COLUMN price;
+DROP INDEX IF EXISTS idx_event_id;

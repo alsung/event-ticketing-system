@@ -72,16 +72,16 @@ func LoginUser(w http.ResponseWriter, r *http.Request) {
 
 	var user models.User
 	err = conn.QueryRow(context.Background(),
-		"SELECT email FROM users WHERE email = $1 AND password = $2",
+		"SELECT id, email FROM users WHERE email = $1 AND password = $2",
 		req.Email, req.Password,
-	).Scan(&user.Email)
+	).Scan(&user.ID, &user.Email)
 
 	if err != nil {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	token, err := utils.GenerateJWT(user.Email)
+	token, err := utils.GenerateJWT(user.ID, user.Email)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

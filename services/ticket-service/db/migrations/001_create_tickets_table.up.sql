@@ -3,7 +3,7 @@ CREATE TABLE tickets (
     event_id UUID NOT NULL REFERENCES events(id),
     user_id UUID REFERENCES users(id),
     price DECIMAL(10, 2) NOT NULL,
-    status TEXT NOT NULL DEFAULT 'available',
+    status TEXT CHECK(status IN ('reserved', 'purchased', 'cancelled')) NOT NULL DEFAULT 'reserved',
     purchased_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT NOW()
 );

@@ -16,8 +16,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/purchase", handlers.PurchaseTicket)
-	mux.HandleFunc("/list", handlers.ListAvailableTickets)
+	mux.HandleFunc("/tickets/purchase", handlers.PurchaseTicket)
+	mux.HandleFunc("/tickets/create", handlers.CreateTickets)
+	mux.HandleFunc("/tickets/available", handlers.ListAvailableTickets)
+	// mux.HandleFunc("/tickets/cancel", handlers.CancelTicket)
+	// mux.HandleFunc("/tickets/purchased", handlers.ListPurchasedTickets)
 
 	handlerWithMiddleware := middleware.Logging(mux)
 

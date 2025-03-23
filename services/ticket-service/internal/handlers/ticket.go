@@ -3,10 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"time"
 
+	"github.com/alsung/event-ticketing-system/services/pkg/database"
 	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
-	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -14,11 +16,17 @@ import (
 func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		EventID uuid.UUID `json:"event_id"`
-		UserID  uuid.UUID `json:"user_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Securely get userID from JWT
+	userID, err := middleware.GetUserIDFromJWT(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -27,7 +35,7 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close(context.Background())
+	defer db.Close()
 
 	tx, err := db.Begin(context.Background())
 	if err != nil {
@@ -44,7 +52,18 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 	`, req.EventID).Scan(&ticketID)
 
 	if err != nil {
-		http.Error(w, "Could not purchase ticket", http.StatusInternalServerError)
+		http.Error(w, "No available tickets", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec(context.Background(), `
+		UPDATE tickets
+		SET status = 'purchased', user_id = $1, purchased_at = NOW()
+		WHERE id = $2
+	`, userID, ticketID)
+
+	if err != nil {
+		http.Error(w, "Failed to update ticket", http.StatusInternalServerError)
 		return
 	}
 
@@ -74,7 +93,7 @@ func ListAvailableTickets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close(context.Background())
+	defer db.Close()
 
 	rows, err := db.Query(context.Background(), `
 		SELECT id, price, created_at FROM tickets
@@ -90,7 +109,7 @@ func ListAvailableTickets(w http.ResponseWriter, r *http.Request) {
 	type Ticket struct {
 		ID        uuid.UUID `json:"id"`
 		Price     float64   `json:"price"`
-		CreatedAt string    `json:"created_at"`
+		CreatedAt time.Time `json:"created_at"`
 	}
 
 	var tickets []Ticket
@@ -120,23 +139,38 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Quantity <= 0 {
+		http.Error(w, "Invalid quantity", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+
 	// Extract user ID from JWT
 	userID, err := middleware.GetUserIDFromJWT(r)
+	log.Println("userID", userID)
 	if err != nil {
+		log.Println("err", err)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(context.Background())
+	isAdmin, err := middleware.IsAdmin(ctx, userID)
+	if err != nil {
+		http.Error(w, "Error checking admin status", http.StatusInternalServerError)
+		return
+	}
+
+	db, err := database.NewDatabaseConnection(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close(context.Background())
+	defer db.Close()
 
-	// Validate that the user is the organizer of the event
+	// Validate that the user is the organizer of the event or admin
 	var organizerID uuid.UUID
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		SELECT organizer_id FROM events WHERE id = $1
 	`, req.EventID).Scan(&organizerID)
 
@@ -145,20 +179,21 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if userID != organizerID {
-		http.Error(w, "Forbidden: You are not the organizer/admin", http.StatusForbidden)
+	// Allow admin OR organizer to create tickets
+	if userID != organizerID && !isAdmin {
+		http.Error(w, "Forbidden: You are not the organizer or admin", http.StatusForbidden)
 		return
 	}
 
-	tx, err := db.Begin(context.Background())
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		http.Error(w, "Transaction error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback(ctx)
 
 	for i := 0; i < req.Quantity; i++ {
-		_, err = tx.Exec(context.Background(), `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO tickets (event_id, price)
 			VALUES ($1, $2)
 		`, req.EventID, req.Price)
@@ -169,7 +204,7 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		http.Error(w, "Transaction commit failed", http.StatusInternalServerError)
 		return
 	}

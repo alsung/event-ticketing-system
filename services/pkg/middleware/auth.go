@@ -1,11 +1,13 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/alsung/event-ticketing-system/services/pkg/database"
 	"github.com/golang-jwt/jwt"
 	"github.com/google/uuid"
 )
@@ -38,4 +40,25 @@ func GetUserIDFromJWT(r *http.Request) (uuid.UUID, error) {
 	}
 
 	return uuid.Parse(userIdStr)
+}
+
+// IsAdmin checks if the user is an admin
+func IsAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
+	// Check if user is an admin, check user database table 'is_admin' column if true or false
+	db, err := database.NewDatabaseConnection(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	var isAdmin bool
+	err = db.QueryRow(ctx, `
+		SELECT is_admin FROM users WHERE id = $1
+	`, userID).Scan(&isAdmin)
+
+	if err != nil {
+		return false, err
+	}
+
+	return isAdmin, nil
 }

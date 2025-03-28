@@ -279,3 +279,101 @@ func GetUserTickets(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(tickets)
 }
+
+// CancelTicket allows users to cancel one of their purchased tickets
+// which makes it available again for others to purchase.
+// It also logs the cancellation in ticket_cancellation_logs.
+func CancelTicket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TicketID uuid.UUID `json:"ticket_id"`
+		Reason   string    `json:"reason"` // optional
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	userID, err := middleware.GetUserIDFromJWT(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	db, err := database.NewDatabaseConnection(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		http.Error(w, "Transaction begin failed", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Ensure ticket belongs to user and is in 'purchased' status
+	var existingStatus string
+	var eventID uuid.UUID
+	err = db.QueryRow(ctx, `
+		SELECT status, event_id FROM tickets
+		WHERE id = $1 AND user_id = $2
+	`, req.TicketID, userID).Scan(&existingStatus, &eventID)
+
+	if err != nil {
+		http.Error(w, "Ticket not found", http.StatusNotFound)
+		return
+	}
+
+	if existingStatus != "purchased" {
+		http.Error(w, "Only purchased tickets can be cancelled", http.StatusBadRequest)
+		return
+	}
+
+	// Set ticket status back to 'available' and null out user-specific info
+	_, err = db.Exec(ctx, `
+		UPDATE tickets
+		SET status = 'available',
+			user_id = NULL,
+			purchased_at = NULL,
+			qr_code = NULL
+		WHERE id = $1
+	`, req.TicketID)
+	if err != nil {
+		http.Error(w, "Failed to cancel ticket", http.StatusInternalServerError)
+		return
+	}
+
+	// Log the cancellation
+	var reasonPtr *string
+	if req.Reason != "" {
+		reasonPtr = &req.Reason
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO ticket_cancellation_logs (ticket_id, user_id, event_id, reason)
+		VALUES ($1, $2, $3, $4)
+	`, req.TicketID, userID, eventID, reasonPtr)
+	if err != nil {
+		http.Error(w, "Failed to log ticket cancellation", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, "Transaction commit failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Ticket cancelled and returned to pool",
+	})
+}

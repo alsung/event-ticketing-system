@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -214,4 +215,67 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		"message":  "Tickets created successfully",
 		"quantity": req.Quantity,
 	})
+}
+
+// GetUserTickets lists all tickets purchased by a user
+func GetUserTickets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := context.Background()
+
+	userID, err := middleware.GetUserIDFromJWT(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	db, err := database.NewDatabaseConnection(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.Query(ctx, `
+		SELECT id, event_id, price, status, purchased_at, qr_code
+		FROM tickets
+		WHERE user_id = $1 AND status = 'purchased'
+	`, userID)
+	if err != nil {
+		http.Error(w, "Query error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type PurchasedTicket struct {
+		ID          uuid.UUID `json:"id"`
+		EventID     uuid.UUID `json:"event_id"`
+		Price       float64   `json:"price"`
+		Status      string    `json:"status"`
+		PurchasedAt time.Time `json:"purchased_at"`
+		QRCode      *string   `json:"qr_code,omitempty"`
+	}
+
+	var tickets []PurchasedTicket
+	for rows.Next() {
+		var t PurchasedTicket
+		var qr sql.NullString
+
+		if err := rows.Scan(&t.ID, &t.EventID, &t.Price, &t.Status, &t.PurchasedAt, &qr); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if qr.Valid {
+			t.QRCode = &qr.String
+		}
+
+		tickets = append(tickets, t)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(tickets)
 }

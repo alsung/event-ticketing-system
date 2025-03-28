@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS ticket_cancellation_logs;

@@ -15,8 +15,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handlers.GetEvents)         // GET events
-	mux.HandleFunc("/create", handlers.CreateEvent) // POST create events
+	mux.HandleFunc("/events", handlers.GetEvents)          // GET events
+	mux.HandleFunc("/events/create", handlers.CreateEvent) // POST create events
 
 	handlerWithMiddleware := middleware.Logging(mux)
 

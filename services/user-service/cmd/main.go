@@ -15,8 +15,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/register", handlers.RegisterUser)
-	mux.HandleFunc("/login", handlers.LoginUser)
+	mux.HandleFunc("/users/register", handlers.RegisterUser)
+	mux.HandleFunc("/users/login", handlers.LoginUser)
 
 	handlerWithMiddleware := middleware.Logging(mux)
 

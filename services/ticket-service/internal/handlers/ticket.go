@@ -10,11 +10,17 @@ import (
 
 	"github.com/alsung/event-ticketing-system/services/pkg/database"
 	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/utils"
 	"github.com/google/uuid"
 )
 
 // PurchaseTicket handles ticket purchasing logic
 func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var req struct {
 		EventID uuid.UUID `json:"event_id"`
 	}
@@ -51,17 +57,27 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 		WHERE event_id = $1 AND status = 'available'
 		LIMIT 1 FOR UPDATE
 	`, req.EventID).Scan(&ticketID)
-
 	if err != nil {
 		http.Error(w, "No available tickets", http.StatusInternalServerError)
 		return
 	}
 
+	// Generate QR code based64 string
+	qrString := ticketID.String()
+	qrCodeBase64, err := utils.GenerateQRCodeBase64(qrString)
+	if err != nil {
+		http.Error(w, "Failed to generate QR code", http.StatusInternalServerError)
+		return
+	}
+
 	_, err = tx.Exec(context.Background(), `
 		UPDATE tickets
-		SET status = 'purchased', user_id = $1, purchased_at = NOW()
-		WHERE id = $2
-	`, userID, ticketID)
+		SET user_id = $1,
+			status = 'purchased',
+			purchased_at = NOW(),
+			qr_code = $2
+		WHERE id = $3
+	`, userID, qrCodeBase64, ticketID)
 
 	if err != nil {
 		http.Error(w, "Failed to update ticket", http.StatusInternalServerError)
@@ -77,6 +93,7 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ticket_id": ticketID,
 		"message":   "Ticket successfully purchased",
+		"qr_code":   qrCodeBase64,
 	})
 }
 

@@ -394,3 +394,73 @@ func CancelTicket(w http.ResponseWriter, r *http.Request) {
 		"message": "Ticket cancelled and returned to pool",
 	})
 }
+
+// GetTicketReceipt returns the ticket info along with the QR code
+func GetTicketReceipt(w http.ResponseWriter, r *http.Request) {
+	log.Println("GetTicketReceipt called")
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ticketIDStr := r.URL.Query().Get("ticket_id")
+	if ticketIDStr == "" {
+		http.Error(w, "Missing ticket_id", http.StatusBadRequest)
+		return
+	}
+
+	ticketID, err := uuid.Parse(ticketIDStr)
+	if err != nil {
+		http.Error(w, "Invalid ticket_id format", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	userID, err := middleware.GetUserIDFromJWT(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	db, err := database.NewDatabaseConnection(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	var (
+		eventID     uuid.UUID
+		price       float64
+		status      string
+		purchasedAt time.Time
+		qrCode      string
+	)
+
+	err = db.QueryRow(ctx, `
+		SELECT event_id, price, status, purchased_at, qr_code
+		FROM tickets
+		WHERE id = $1 AND user_id = $2
+	`, ticketID, userID).Scan(&eventID, &price, &status, &purchasedAt, &qrCode)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Ticket not found or not owned by user", http.StatusNotFound)
+		} else {
+			http.Error(w, "Query error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	resp := map[string]interface{}{
+		"ticket_id":    ticketID,
+		"event_id":     eventID,
+		"price":        price,
+		"status":       status,
+		"purchased_at": purchasedAt,
+		"qr_code":      qrCode,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}

@@ -21,6 +21,7 @@ func main() {
 	mux.HandleFunc("/tickets/available", handlers.ListAvailableTickets)
 	mux.HandleFunc("/tickets/mine", handlers.GetUserTickets)
 	mux.HandleFunc("/tickets/cancel", handlers.CancelTicket)
+	mux.HandleFunc("/tickets/receipt", handlers.GetTicketReceipt)
 	// mux.HandleFunc("/tickets/purchased", handlers.ListPurchasedTickets)
 
 	handlerWithMiddleware := middleware.Logging(mux)

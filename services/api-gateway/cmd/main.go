@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported"
+	exportedMiddleware "github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported/middleware"
 	sharedMiddleware "github.com/alsung/event-ticketing-system/services/pkg/middleware"
 	"github.com/joho/godotenv"
 )
@@ -14,13 +15,14 @@ func main() {
 		log.Fatal("Failed to load .env file")
 	}
 
-	// Initialize Gateway through exported function (public API)
 	gatewayHandler := exported.NewGatewayHandler()
 
-	// Only apply logging globally
-	handlerWithMiddleware := sharedMiddleware.Logging(gatewayHandler)
+	// Apply middleware: CORS -> JWT -> Logging
+	handler := exportedMiddleware.CORSMiddleware(gatewayHandler)
+	handler = exportedMiddleware.JWTMiddleware(handler)
+	handler = sharedMiddleware.Logging(handler)
 
-	http.Handle("/", handlerWithMiddleware)
+	http.Handle("/", handler)
 
 	log.Println("API Gateway running on :8000")
 	if err := http.ListenAndServe(":8000", nil); err != nil {

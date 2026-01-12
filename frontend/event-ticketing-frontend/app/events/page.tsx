@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from "react";
+import { useUser } from "@/context/UserContext";
 
 interface Event {
     id: string;
@@ -13,12 +14,13 @@ interface Event {
     created_at: string;
 }
 
-export default function EventsPage() {
+export default function MyEventsPage() {
+    const { user } = useUser();
     const [events, setEvents] = useState<Event[]>([]);
     const [error, setError] = useState('');
     
     useEffect(() => {
-        const fetchEvents = async () => {
+        const fetchUserEvents = async () => {
             const token = localStorage.getItem('token');
 
             try {
@@ -42,12 +44,12 @@ export default function EventsPage() {
             }
         };
 
-        fetchEvents();
+        fetchUserEvents();
     }, []);
     
     return (
         <div className="min-h-screen p-8 bg-gray-50">
-            <h1 className="text-2xl font-bold mb-6 text-center">Upcoming Events</h1>
+            <h1 className="text-2xl font-bold mb-6 text-center">My Upcoming Events</h1>
 
             {error && (
                 <p className="text-red-500 text-center mb-4">{error}</p>

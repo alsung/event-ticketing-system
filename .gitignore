@@ -25,3 +25,9 @@ go.work.sum
 .env
 
 .vscode
+
+# node
+node_modules/
+
+# compiled service binaries
+services/*/main

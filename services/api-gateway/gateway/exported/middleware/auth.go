@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -8,33 +9,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var openRoutes = []string{
-	"/users/register",
-	"/users/login",
-}
-
+// JWTMiddleware verifies the bearer token on protected routes. It is applied
+// per-route by GatewayHandler rather than globally, so public routes such as
+// GET /events and POST /users/login never reach it.
+//
+// CORS headers are deliberately not set here: CORSMiddleware wraps this one and
+// owns them for every response, including the 401s produced below.
 func JWTMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow requests from the frontend
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Short-circuit preflight OPTIONS requests
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		// Allow open routes without JWT
-		for _, route := range openRoutes {
-			if strings.HasPrefix(r.URL.Path, route) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// JWT Authentication
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -42,7 +24,13 @@ func JWTMiddleware(next http.Handler) http.Handler {
 		}
 
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+			// Pin the algorithm. Without this check a token signed with "none",
+			// or an RS256 token whose public key is replayed as an HMAC secret,
+			// would be accepted.
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
 			return []byte(os.Getenv("JWT_SECRET")), nil
 		})
 

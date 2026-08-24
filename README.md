@@ -1,487 +1,497 @@
-# Event Ticketing System - DESIGN.md
+# Event Ticketing System
 
-## 1) Purpose
+A full-stack event ticketing platform built as a distributed-systems study: four Go microservices
+behind an API gateway, PostgreSQL for durable state, Stripe for payments, and Kafka for asynchronous
+fan-out of purchase and cancellation events.
 
-Build a full-stack event ticketing platform where: 
-
-- **Users** can register/login, browse events, purchase and cancel tickets, and view receipts containing **QR codes** for admission. 
-- **Admins/Organizers** can create events and create ticket inventory.
-- The backend uses a **microservice-style architecture** (Go services) behind a **Go API Gateway**, and a **Next.js frontend** consumes only the gateway.
-
-This repo is also meant to be a **system design interview artifact**:
-- clear components + boundaries
-- precise APIs + data model
-- reliable flows (purchase/cancel)
-- scaling + hardening roadmap
-
-Non-goals (for now):
-- payments integration
-- seat maps / reserved seating
-- complex promotion/discount engine
-- event discovery ranking/search relevance
+The interesting problem here is **selling a fixed pool of tickets to concurrent buyers without ever
+overselling**, while keeping payment charges idempotent and downstream consumers eventually
+consistent. Most of this document is about how that is done and why.
 
 ---
 
-## 2) Architecture Overview
+## Status
 
-### 2.1 High-level request flow
+| Phase | Scope | State |
+|---|---|---|
+| **0** | Reproducible local stack (`docker compose up` works end to end) | 🔨 In progress |
+| **1** | Concurrency correctness + k6 load validation | ⬜ Not started |
+| **2** | Stripe charge/refund with idempotency keys | ⬜ Not started |
+| **3** | Kafka async flows via transactional outbox | ⬜ Not started |
+| **4** | Frontend purchase/cancel flows + observability | ⬜ Not started |
 
-**Next.js Frontend (localhost:3000)**
---> **API Gateway (localhost:8000)**
---> **User Service (8081)** / **Event Service (8082)** / **Ticket Service (8083)**
---> **PostgreSQL (localhost:5433 --> container 5432)**
+Phase detail, including acceptance criteria, is in [Delivery Phases](#delivery-phases).
 
-### 2.2 Logical diagram
+---
+
+## Architecture
 
 ```text
-+-------------------------+        +--------------------------+        +------------------------+
-|  Next.js Frontend       |  HTTP  |        API Gateway       |  HTTP  |      User Service      |
-|  http://localhost:3000  | -----> |   http://localhost:8000  | -----> |   http://localhost:8081|
-|                         |        | - routing (reverse proxy)|        +------------------------+
-|                         |        | - CORS + OPTIONS         |
-|                         |        | - JWT auth (protected)   |        +------------------------+
-|                         |        | - request logging        |  HTTP  |     Event Service      |
-+-------------------------+        +--------------------------+ -----> |   http://localhost:8082|
-                                                          |            +------------------------+
-                                                          |
-                                                          |            +------------------------+
-                                                          |     HTTP   |     Ticket Service     |
-                                                          +----------> |   http://localhost:8083|
-                                                                       +------------------------+
-                                                                                  |
-                                                                                  | SQL
-                                                                                  v
-                                                                       +------------------------+
-                                                                       |   PostgreSQL Database  |
-                                                                       |   localhost:5433       |
-                                                                       |   (container:5432)     |
-                                                                       |   db: event_ticketing  |
-                                                                       +------------------------+
+                        ┌──────────────────────────┐
+                        │   Next.js Frontend       │
+                        │   localhost:3000         │
+                        └────────────┬─────────────┘
+                                     │ HTTPS/JSON (gateway only)
+                                     ▼
+                        ┌──────────────────────────┐
+                        │      API Gateway :8000   │
+                        │  CORS · JWT · logging    │
+                        │  prefix-based routing    │
+                        └────┬────────┬────────┬───┘
+                             │        │        │
+              ┌──────────────┘        │        └──────────────┐
+              ▼                       ▼                       ▼
+     ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────────┐
+     │  User Service   │    │  Event Service  │    │   Ticket Service    │
+     │      :8081      │    │      :8082      │    │        :8083        │
+     │  register/login │    │  catalog CRUD   │    │  inventory·purchase │
+     │  JWT issuance   │    │                 │    │  cancel·refund·QR   │
+     └────────┬────────┘    └────────┬────────┘    └──────┬───────┬──────┘
+              │                      │                    │       │
+              └──────────────────────┴────────────────────┘       │ charge/refund
+                                     │                            ▼
+                                     ▼                   ┌──────────────────┐
+                          ┌────────────────────┐         │   Stripe API     │
+                          │    PostgreSQL      │         │   (test mode)    │
+                          │    :5433 → 5432    │         └──────────────────┘
+                          │  users · events    │
+                          │  tickets · outbox  │
+                          │  payments · idem   │
+                          └─────────┬──────────┘
+                                    │ polled by relay
+                                    ▼
+                          ┌────────────────────┐        ┌─────────────────────┐
+                          │   Outbox Relay     │───────▶│   Kafka (KRaft)     │
+                          │  (ticket-service)  │        │  ticket.purchased   │
+                          └────────────────────┘        │  ticket.cancelled   │
+                                                        └──────────┬──────────┘
+                                                                   ▼
+                                                        ┌─────────────────────┐
+                                                        │ Notification Worker │
+                                                        │  consumer group     │
+                                                        └─────────────────────┘
 ```
 
-### 2.3 Component responsibilities (detailed)
+### Service responsibilities
 
-#### Frontend (Next.js + Tailwind + TypeScript)
-- UI flows:
-    - login/register
-    - "My events" (events user has tickets for)
-    - browse all upcoming events
-    - view owned tickets + cancel
-- State:
-    - stores JWT in localStorage (dev)
-    - uses a `UserContext` to decode claims and expose `user`, `signOut()`
-- Networking:
-    - all calls go to `http://localhost:8000/...` (gateway only)
+| Service | Owns | Notes |
+|---|---|---|
+| **api-gateway** | Edge concerns | Sole entry point for the browser. CORS, JWT verification, request logging, prefix routing (`/users`, `/events`, `/tickets`). Forwards the full path unchanged. |
+| **user-service** | Identity | Registration, login, JWT issuance (`user_id`, `email`, `exp`), `is_admin` flag. |
+| **event-service** | Catalog | Event creation and listing. Owns the definition of "upcoming" (`start_time >= now`). |
+| **ticket-service** | Inventory + money | The critical path: minting inventory, the purchase transaction, cancellation/refund, QR receipts, and the outbox relay. |
 
-#### API Gateway (Go, `net/http`, reverse proxy)
-- Central entrypoint and "edge" layer:
-    - CORS headers + preflight response for `OPTIONS`
-    - JWT verification for protected routes
-    - request logging (shared middleware)
-    - service routing (path prefix -> upstream)
-- Important property:
-    - gateway should forward request method/body/query/headers to downstream.
-    - for protected routes, gateway checks JWT and forwards request as-is.
-
-#### User Service
-- Responsibilities:
-    - user creation
-    - login and JWT issuance
-    - admin flag stored on user (`is_admin`)
-- Current simplifications:
-    - passwords are plaintext in DB (should be hashed later)
-    - no email verification / password reset yet
-
-#### Event Service
-- Responsibilities:
-    - create events
-    - list events (all upcoming)
-    - list events a user has tickets for (planned)
-- Owns event semantics:
-    - what is "upcoming" (start_time >= now)
-    - organizer_id relationship
-
-#### Ticket Service
-- Responsibilities: 
-    - inventory creation: "mint" tickets for event
-    - list available inventory by event
-    - purchase flow: claim a ticket atomically
-    - cancellation: return-to-pool + log
-    - receipts: view ticket details + QR
-- Guarantees:
-    - prevent oversell by locking inventory rows during purchase (row-level locking)
-    - only ticket owner can cancel
-    - cancellation writes an audit record
-
-#### PostgreSQL
-- Source of truth for: 
-    - users
-    - events
-    - ticket inventory + ownership + status
-    - cancellation logs (audit trail)
-- Migration management:
-    - `schema_migrations` table used by `migrate` tool
-    - migrations tracked by version integer
-
-> NOTE: The project currently uses one shared DB (dev). In a production microservices narrative, this can evolve to per-service DB ownership.
+Services communicate over HTTP through the gateway; the ticket service talks to Stripe directly and
+publishes to Kafka via the outbox relay. This is a single shared database in dev — see
+[Known simplifications](#known-simplifications).
 
 ---
 
-## 3) Key Workflows (Sequence Diagrams)
+## Design decisions
 
-### 3.1 Register + Login
+This section is the point of the project. Each decision below has a defensible alternative that was
+considered and rejected.
 
-1. User registers:
-    - frontend `POST /users/register`
-    - gateway forwards to user service
-    - user service inserts user row
-2. User logs in:
-    - frontend `POST /users/login`
-    - user service validates credentials, return JWT with `user_id`
+### 1. Two isolation levels, chosen per workload
 
-**JWT claims:**
-- `email`
-- `user_id`
-- `exp`
+A single blanket isolation level is the wrong answer here, because the two write paths have opposite
+characteristics. The system deliberately uses different strategies for each.
 
-### 3.2 Create event (admin/organizer)
+**Purchase — `READ COMMITTED` + `SELECT … FOR UPDATE SKIP LOCKED`**
 
-- frontend calls `POST /events/create` with JWT
-- gateway verifies JWT and forwards
-- event service inserts into `events` with `organizer_id`
+Claiming a ticket is a high-contention operation on one hot table. Every concurrent buyer for a given
+event targets the same set of rows. The claim is:
 
-### 3.3 Create ticket inventory (admin/organizer)
+```sql
+SELECT id FROM tickets
+ WHERE event_id = $1 AND status = 'available'
+ ORDER BY id
+ LIMIT 1
+ FOR UPDATE SKIP LOCKED;
+```
 
-- frontend calls `POST /tickets/create` with JWT
-- ticket service:
-    - verifies JWT -> extracts `user_id`
-    - checks user admin flag (and optionally organizer match for event)
-    - inserts N tickets for event with price, initial status
+`SKIP LOCKED` is what makes this scale. Without it, 100 concurrent buyers serialize into a single
+queue behind one row lock, and — worse — PostgreSQL re-evaluates the `WHERE` clause after each lock
+is released. Combined with `LIMIT 1`, a waiting transaction wakes up, finds its candidate row now
+`purchased`, and returns **zero rows** even though inventory remains. That surfaces as a spurious
+"sold out" error under exactly the load you would want to demo. `SKIP LOCKED` sidesteps both problems:
+each transaction immediately claims a *different* unlocked row.
 
-### 3.4 Purchase ticket (critical path)
+`SERIALIZABLE` would be actively wrong here. Under 100 concurrent buyers it produces a storm of
+serialization failures and retries for an invariant that a row lock already enforces perfectly.
 
-Goal: purchase exactly one available ticket, never oversell.
+**Cancel / refund — `SERIALIZABLE` with a retry loop**
 
-Recommended DB pattern:
-- begin transaction
-- `SELECT id FROM tickets WHERE event_id=$1 AND status='available' LIMIT 1 FOR UPDATE`
-- `UPDATE tickets SET status='purchased', user_id=$2, purchased_at=NOW(), qr_code=$3 WHERE id=$ticketID`
-- commit
-- return `{ticket_id, qr_code_base64}`
+Cancellation is low-volume but spans three tables: it must verify the ticket is `purchased` and owned
+by the caller, verify no refund has already been issued against the `payments` row, release the
+ticket back to the pool, write the audit log, and enqueue the outbox event. The invariant
+*"a ticket is refunded at most once"* spans a read-then-write across tables, which is precisely the
+shape that row locks do not protect and `SERIALIZABLE` does.
 
-QR:
-- generate data payload (ticket_id + event_id + user_id)
-- encode as QR image
-- store base64 (or store raw data + generate later)
-- return base64 to client in purchase response
+The cost is that transactions can abort with SQLSTATE `40001` (`serialization_failure`) or `40P01`
+(`deadlock_detected`). Both are retried with exponential backoff and jitter, capped at 3 attempts.
+Because the whole operation is wrapped in an idempotency key, a retry is always safe.
 
-### 3.5 Cancel ticket (return to pool + audit)
+> **The rule of thumb:** row-level locks where you need throughput on a single hot table;
+> `SERIALIZABLE` where the invariant spans tables and volume is low enough to absorb retries.
 
-- user calls `POST /tickets/cancel` with `ticket_id` (+ optional reason)
-- ticket service:
-    - verifies JWT (user_id)
-    - verifies ticket belongs to user and status = purchased
-    - update ticket to available:
-        - `status='available'`
-        - `user_id=NULL`
-        - `purchased_at=NULL`
-        - `qr_code=NULL` (or keep but invalidate)
-    - insert audit log row into `ticket_cancellation_logs`
-    - return success
+### 2. Idempotency in two layers
 
-**Return-to-pool policy:** immediate. (Later could introduce "cooldown window")
+Double-charging a customer is the worst failure this system can produce, and it is easy to trigger:
+a user double-clicks, a mobile client retries on a flaky connection, a load balancer replays a
+request. Both layers are necessary.
 
-### 3.6 View receipt (QR later)
+**Layer 1 — application-level deduplication.** Clients send an `Idempotency-Key` header on
+`POST /tickets/purchase` and `POST /tickets/cancel`. The service records the key, the caller, and a
+hash of the request body in an `idempotency_keys` table with a unique constraint on the key. On a
+replay:
 
-- client calls `GET /tickets/receipt?...`
-- ticket service returns ticket details + stored base64 QR
+- Same key, same request hash, work already complete → the stored response is replayed verbatim.
+- Same key, same request hash, work still in flight → `409 Conflict`, telling the client to retry.
+- Same key, **different** request hash → `422 Unprocessable Entity`. The key is being reused for a
+  different operation, which is a client bug worth surfacing loudly rather than silently guessing.
 
----
+The key is inserted in the *same transaction* as the ticket claim, so the dedup record and the state
+change commit or roll back together.
 
-## 4) Authentication & Authorization
+**Layer 2 — Stripe's own idempotency.** The same key is forwarded to Stripe via
+`params.SetIdempotencyKey(...)`. Layer 1 cannot protect the window between "we called Stripe" and
+"we committed our transaction" — if the process dies there, we have a charge with no local record.
+Stripe's key ensures the retry returns the *original* PaymentIntent instead of creating a second one,
+letting us reconcile rather than double-charge.
 
-### 4.1 JWT Authentication
-- Gateway enforces auth for protected routes.
-- Open routes:
-    - `/users/register`
-    - `/users/login`
+### 3. Transactional outbox instead of dual writes
 
-Token verification:
-- HMAC secret `JWT_SECRET` (dev)
-- verify signature, expiration, and algorithm
+The obvious way to publish a purchase event is to commit to Postgres and then produce to Kafka. This
+is broken: the two systems have no shared transaction. A crash between them either loses the event
+(consumers never learn about the purchase) or, if published first, announces a purchase that then
+rolls back.
 
-### 4.2 Authorization Rules (current / intended)
+Instead, the purchase transaction writes its event to an `outbox` table **in the same transaction**
+as the ticket update. A relay goroutine polls for unpublished rows, produces to Kafka, and marks them
+sent. The state change and the intent-to-publish are now atomic.
 
-**Admin**
-- `users.is_admin = true`
-- can create inventory (`/tickets/create`)
-- may create events (`/events/create`) depending on rule
+This gives **at-least-once** delivery: the relay may crash after producing but before marking the row
+sent, republishing on restart. Consumers are therefore written to be idempotent, keyed on `ticket_id`
+plus event type. Exactly-once across a database and a broker is not achievable without distributed
+transactions, and at-least-once plus idempotent consumers is the standard, honest tradeoff.
 
-**Organizer**
-- events have `organizer_id`
-- organizer can mint tickets for their events
-- rule could be:
-    - allow if `is_admin == true OR organizer_id == user_id`
+### 4. Why Kafka, and not Redpanda / SQS / Postgres LISTEN-NOTIFY
 
-Future extension:
-- roles table (admin, organizer, staff)
-- per-event permissions
+Genuinely evaluated, and worth being able to defend:
 
----
+- **Redpanda** — Kafka-API-compatible, single binary, no JVM, boots in about a second versus Kafka's
+  ~20. The Go client code is *identical*, so it is a drop-in. Rejected because with KRaft mode
+  (no ZooKeeper) Kafka's operational overhead is now a handful of compose environment variables, and
+  matching what the majority of production deployments actually run is worth more than faster local
+  boots. Redpanda would be the right call for a resource-constrained CI environment.
+- **AWS SQS** — simpler, fully managed, but a queue rather than a log. No replay, no independent
+  consumer groups reading the same stream at different offsets. Ticketing wants a durable, replayable
+  log: an analytics consumer and a notification consumer should read the same events independently.
+- **Postgres `LISTEN`/`NOTIFY`** — appealing given a database is already present, and genuinely fine
+  at small scale. Rejected because notifications are fire-and-forget: a disconnected listener misses
+  them permanently, with no offsets and no replay. That is a poor fit for payment-adjacent events.
 
-## 5) Database Connections & Env
+Kafka is chosen for the durable replayable log and independent consumer groups. Running it in
+**KRaft mode** drops the ZooKeeper dependency entirely.
 
-### 5.1 Common env vars
-- `DB_URL=postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable`
-- `JWT_SECRET=my_dev_secret_key_123`
+### 5. Layered structure in one service, not all four
 
-### 5.2 Service DB usage
-- Services use shared db connector:
-    - `services/pkg/database.NewDatabaseConnection(ctx)`
+`ticket-service` is split into three layers; the other services are not.
 
----
+| Layer | Responsibility | Never touches |
+|---|---|---|
+| `handlers` | Decode the request, call the service, encode the response, map errors to status codes | SQL, business rules |
+| `service` | Owns transactions; orchestrates store, payments, and outbox | HTTP types |
+| `store` | SQL only, against a `pgx.Tx` supplied by the caller | Transaction boundaries |
 
-## 6) Data Model (Tables + Constraints)
+The governing rule is that **the service layer opens the transaction and the store layer receives
+it**. That is what allows a single purchase transaction to atomically span `tickets`, `payments`,
+`idempotency_keys`, and `outbox` — four stores, one commit.
 
-### 6.1 `users`
+This split was not adopted as a general principle. It is the minimum structure required to write one
+specific test:
 
-Fields: 
-- `id` UUID PK
-- `email` TEXT UNIQUE NOT NULL
-- `password` TEXT NOT NULL *(dev plaintext; must hash later)*
-- `full_name` TEXT NOT NULL
-- `is_admin` BOOLEAN NOT NULL DEFAULT false
-- `created_at` TIMESTAMP DEFAULT now()
+> *Stripe's charge succeeds, then the local commit fails. Does the ticket return to the pool, and
+> does the retry avoid double-charging?*
 
-Indexes:
-- unique on email
+That test needs a payment provider that can be made to fail on demand (hence an interface rather than
+a concrete Stripe client), business logic invokable without an HTTP server (hence service separated
+from handlers), and a transaction the test itself controls (hence stores that accept a `pgx.Tx`).
+The three layers are what that requirement decomposes into.
 
-### 6.2 `events`
+`user-service` and `event-service` deliberately keep flat handlers. They own no multi-table
+invariants, call no external providers, and have nothing to fake — layering them would add
+indirection to buy nothing. Applying the structure only where it pays for itself is the point.
 
-Fields:
-- `id` UUID PK
-- `name` TEXT NOT NULL
-- `description` TEXT
-- `location` TEXT
-- `start_time` TIMESTAMP NOT NULL
-- `end_time` TIMESTAMP NOT NULL
-- `organizer_id` UUID REFERENCES users(id)
-- `created_at` TIMESTAMP DEFAULT now()
+The cost, stated plainly: for simple reads like `GET /tickets/available`, the service layer is a
+pass-through that adds no value. It is kept anyway, because two competing patterns inside one package
+is more expensive to read than one uniform pattern with a few thin methods.
 
-Indexes (recommended):
-- index on `start_time`
-- index on `organizer_id`
+### 6. Topics
 
-### 6.3 `tickets`
+| Topic | Key | Produced when | Consumed by |
+|---|---|---|---|
+| `ticket.purchased` | `ticket_id` | Purchase transaction commits | Notification worker (confirmation + QR), future analytics |
+| `ticket.cancelled` | `ticket_id` | Cancellation transaction commits | Notification worker (refund confirmation) |
 
-Confirmed:
-- `id` UUID PK DEFAULT gen_random_uuid()
-- `event_id` UUID REFERENCES events(id)
-- `user_id` UUID REFERENCES users(id) NULL
-- `qr_code` TEXT UNIQUE NULL
-- `status` TEXT NOT NULL CHECK (status IN ('reserved', 'purchased', 'cancelled')) DEFAULT 'reserved'
-- `purchased_at` TIMESTAMP NULL
-- `created_at` TIMESTAMP DEFAULT now()
-- `price` NUMERIC(10,2) NOT NULL DEFAULT 0.00
-
-Indexes:
-- `idx_event_id(event_id)`
-- recommended composite index `(event_id, status)` for availability queries
-
-**Status semantics (recommended standardization)**
-- `available`: in pool, unowned
-- `purchased`: owned by user
-- `cancelled`: logically cancelled and removed from pool (if not returning to pool)
-
-Given return-to-pool policy, `cancelled` can mean "cancel action occurred" but ticket returns to `available`.
-- either keep `cancelled` but create a new ticket row when returning to pool (more complex)
-- OR treat cancellation as returning to `available` (simpler; audit logs capture the cancellation)
-
-**Recommendation:** use `available` and `purchased` as the active states; keep cancellation history in `ticket_cancellation_logs`.
-
-### 6.4 `ticket_cancellation_logs`
-
-Fields:
-- `id` UUID PK
-- `ticket_id` UUID NOT NULL REFERENCES tickets(id)
-- `user_id` UUID NOT NULL REFERENCES users(id)
-- `event_id` UUID NOT NULL REFERENCES events(id)
-- `cancelled_at` TIMESTAMP DEFAULT now()
-- `reason` TEXT NULL
-
-Indexes (recommended):
-- `(user_id, cancelled_at)`
-- `(ticket_id)`
+Keying by `ticket_id` guarantees all events for one ticket land on the same partition and are
+therefore consumed in order — a cancellation can never be processed before its purchase.
 
 ---
 
-## 7) API Endpoints (External Contract via Gateway)
+## Data model
 
-All endpoints below are called via `http://localhost:8000`
+Existing tables — `users`, `events`, `tickets`, `ticket_cancellation_logs` — plus three added by
+Phases 2 and 3.
 
-### 7.1 User APIs
-- `POST /users/register`
-    - body: `{ email, password, full_name }`
-    - returns: `{ message }`
+### `tickets` (existing)
 
-- `POST /users/login`
-    - body: `{ email, password }`
-    - returns: `{ token }`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `event_id` | UUID FK → events | |
+| `user_id` | UUID FK → users, NULL | NULL while in the available pool |
+| `qr_code` | TEXT UNIQUE NULL | base64 PNG, populated on purchase |
+| `status` | TEXT | Active values: `available`, `purchased` |
+| `price` | NUMERIC(10,2) | |
+| `purchased_at` | TIMESTAMP NULL | |
 
-### 7.2 Event APIs
-- `GET /events/`
-    returns: `[Event]`
+**Status semantics.** Only `available` and `purchased` are live states. Cancellation returns the
+ticket to `available` and records history in `ticket_cancellation_logs` — the ticket row itself is
+never `cancelled`, because the physical seat genuinely is back in the pool. A composite index on
+`(event_id, status)` backs the availability query.
 
-- `POST /events/create`
-    - body: `{ name, description, location, start_time, end_time, organizer_id }`
-    - returns: `{ message }`
+### `payments` (Phase 2)
 
-Planned: 
-- `GET /events/user`
-    - returns: only events the authenticated user has tickets for
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `ticket_id` | UUID FK → tickets | |
+| `user_id` | UUID FK → users | |
+| `stripe_payment_intent_id` | TEXT UNIQUE | |
+| `amount_cents` | BIGINT | Integer cents — never floats for money |
+| `status` | TEXT | `pending`, `succeeded`, `failed`, `refunded` |
+| `stripe_refund_id` | TEXT UNIQUE NULL | Uniqueness enforces at-most-one refund |
 
-### 7.3 Ticket APIs
-- `POST /tickets/create` (admin/organizer)
-    - body: `{ event_id, price, quantity }`
-    - returns `{ message, quantity }`
+### `idempotency_keys` (Phase 2)
 
-- `GET /tickets/available?event_id=<uuid>`
-    - returns `[ { id, price, created_at } ]`
+| Column | Type | Notes |
+|---|---|---|
+| `key` | TEXT PK | Client-supplied |
+| `user_id` | UUID FK → users | Scopes keys per caller |
+| `endpoint` | TEXT | |
+| `request_hash` | TEXT | SHA-256 of the body; detects key reuse |
+| `response_status` | INT NULL | NULL while in flight |
+| `response_body` | JSONB NULL | Replayed verbatim on retry |
+| `created_at` | TIMESTAMP | Reaped after 24h |
 
-- `POST /tickets/purchase`
-    - body: `{ event_id, user_id }` (future: infer user_id from JWT)
-    - returns `{ ticket_id, message, qr_code_base64 }`
+### `outbox` (Phase 3)
 
-- `GET /tickets/mine`
-    - returns: purchased tickets for authenticated user
-
-- `POST /tickets/cancel`
-    - body: `{ ticket_id, reason }`
-    - returns: `{ message }`
-
-- `GET /tickets/receipt?...`
-    - returns: ticket + QR
-
----
-
-## 8) Gateway Routing & Best Practices
-
-### 8.1 Forward-full-path convention (recommended here)
-
-Gateway:
-- routes by prefix (`/users`, `/events`, `/tickets`)
-- forwards the full path downstream unchanged
-
-Service routes:
-- user-service defines `/users/login`, `/users/register`
-- event-service defines `/events/`, `/events/create`
-- ticket-service defines `/tickets/available`, etc.
-
-Why:
-- fewer mismatches
-- less mental overhead during debugging
-- consistent curl calls (always via gateway)
-
-### 8.2 Cross-cutting middleware at gateway
-- CORS (always set headers)
-- OPTIONS preflight
-- JWT validation
-- request logging (request id is a future enhancement)
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL PK | Monotonic; relay polls in order |
+| `aggregate_id` | UUID | The `ticket_id`, used as the Kafka message key |
+| `topic` | TEXT | |
+| `payload` | JSONB | |
+| `created_at` | TIMESTAMP | |
+| `published_at` | TIMESTAMP NULL | NULL = pending. Partial index on `WHERE published_at IS NULL` |
 
 ---
 
-## 9) Observability & Logging
+## API
 
-Current:
-- request loggin middleware prints:
-    - request method + path
-    - duration
-    - remote addr
+All routes are called through the gateway at `http://localhost:8000`.
 
-Recommended upgrades:
-- add request ID header:
-    - gateway generates `X-Request-Id` if missing
-    - forwards downstream
-    - log includes request id everywhere
-- structured logs (JSON) for easier parsing
-- metrics (Prometheus) for:
-    - request count / latency per route
-    - purchase failures, cancellations, available inventory
+### Public
 
----
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `POST` | `/users/register` | `{email, password, full_name}` | `{message}` |
+| `POST` | `/users/login` | `{email, password}` | `{token}` |
+| `GET` | `/events` | — | `[Event]` |
 
-## 10) Current Status (Built vs Remaining)
+### Authenticated (`Authorization: Bearer <jwt>`)
 
-### Completed
-Backend:
-- user-service: register/login + JWT contains user_id
-- api-gateway: routing + CORS + JWT middleware + logging
-- event-service: list + create
-- ticket-service:
-    - create tickets (admin/organizer)
-    - list available tickets
-    - purchase ticket (atomic row lock) + QR base64 return
-    - cancel ticket (return-to-pool) + cancellation logs
-    - get user tickets (`/tickets/mine`) fixed for nullable QR
-    - receipt endpoint works
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `POST` | `/events/create` | `{name, description, location, start_time, end_time}` | `{message}` |
+| `POST` | `/tickets/create` | `{event_id, price, quantity}` | `{message, quantity}` |
+| `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]` |
+| `POST` | `/tickets/purchase` | `{event_id, payment_method_id}` | `{ticket_id, qr_code, payment_intent_id}` |
+| `POST` | `/tickets/cancel` | `{ticket_id, reason?}` | `{message, refund_id}` |
+| `GET` | `/tickets/mine` | — | `[PurchasedTicket]` |
+| `GET` | `/tickets/receipt?ticket_id=` | — | `{ticket, qr_code, payment}` |
 
-Frontend:
-- Next.js scaffold
-- login + register
-- UserContext + signOut
-- Navbar
-- event page fetch works
+`/tickets/purchase` and `/tickets/cancel` accept an **`Idempotency-Key`** header. It is optional but
+strongly recommended; without it, retries may double-charge.
 
-### Remaining (feature roadmap)
-1. **Backend:** `GET /events/user` (events the user has tickets for)
-2. **Frontend:** split UI into:
-    - `/events` = "My upcoming events"
-    - `/browse-events` = all upcoming events grouped by date
-3. **Frontend:** event detail page + purchase flow + receipt view
-4. **Frontend:** "My tickets" page + cancel flow
-5. Hardening:
-    - password hashing
-    - pagination
-    - better error models
-    - request id tracing
-    - caching
+### Status codes
+
+Meaningful codes matter for the load test — a sold-out race must be distinguishable from a genuine
+server fault.
+
+| Code | Meaning |
+|---|---|
+| `200` / `201` | Success |
+| `401` | Missing/invalid JWT |
+| `403` | Authenticated but not the organizer or an admin |
+| `404` | Ticket not found, or not owned by caller |
+| `409` | Sold out, or an idempotent request is still in flight |
+| `422` | Idempotency key reused with a different payload |
+| `502` | Stripe unreachable or returned an error |
 
 ---
 
-## 11) Future Scaling Path (Interview-ready)
+## Delivery phases
 
-### Data & load scaling
-- Hot reads:
-    - events list
-    - ticket availability counts
-    - receipts
-- Add Redis caching at gateway or per service:
-    - cache event list, invalidate on create
-    - cache available ticket counts, invalidate on purchase/cancel
+### Phase 0 — Reproducible local stack 🔨
 
-### Prevent abuse
-- rate-limit login and purchase endpoints
-- idempotency keys on purchase to avoid double-charge patterns (even before payments)
+The repository must clone and run. Currently `docker-compose.yml` cannot start: the event service
+carries an `image: alpine` placeholder that overrides its build, services receive `DB_URL` while the
+code reads `DATABASE_URL`, and the gateway points at `http://user-service:8081` while the compose
+service is named `user_service`.
 
-### Data integrity
-- enforce ticket "available" state properly (standardize status)
-- add a uniqueness strategy for purchase operations:
-    - lock row (`FOR UPDATE`)
-    - update guarded by status
-    - ensure exactly one row updated
+- [ ] Fix compose service names, env var names, remove the `alpine` placeholder
+- [ ] Add a healthcheck-gated `depends_on` so services wait for Postgres
+- [ ] Run migrations automatically on startup
+- [ ] Add a `make seed` target creating an admin, an event, and inventory
+- [ ] Commit the stray built binaries currently tracked (`services/*/main`) to `.gitignore`
 
-### Service ownership (advanced)
-- split DB by service
-- event-service owns events DB
-- ticket-service owns tickets DB
-- user-service owns users DB
-- use events via IDs and APIs rather than cross-table joins
+**Done when:** `git clone && make up && make seed` yields a working system, verified by a smoke script.
+
+### Phase 1 — Concurrency correctness ⬜
+
+Makes the locking claim genuinely true. Highest interview leverage: *"how did you prevent
+overselling"* is the question this project most invites.
+
+- [ ] Replace per-request `pgxpool.New` with a process-level pool (`sync.Once`), sized via
+      `DB_MAX_CONNS`. Every handler currently builds and tears down an entire connection pool per
+      request, which alone will fail a 100-VU test.
+- [ ] Fix `CancelTicket`: its `SELECT` and `UPDATE` run on `db` rather than `tx`, so the ticket is
+      released outside the transaction and a failed audit-log insert cannot roll it back
+- [ ] Add `FOR UPDATE SKIP LOCKED` to the purchase claim
+- [ ] Move cancellation to `SERIALIZABLE` with a `40001`/`40P01` retry helper
+- [ ] Return `409` for sold-out instead of `500`
+- [ ] Replace `sql.ErrNoRows` comparisons with `pgx.ErrNoRows` (the current check never fires)
+- [ ] Hash passwords with bcrypt; migrate existing rows
+- [ ] Composite index on `tickets (event_id, status)`
+- [ ] k6 scenario: 100 VUs against an event with exactly 50 tickets
+
+**Done when:** k6 reports exactly 50 × `200` and 50 × `409`, zero `5xx`, and a post-run SQL check
+confirms no ticket has two owners and `count(purchased) = 50`.
+
+### Phase 2 — Stripe ⬜
+
+- [ ] `PaymentProvider` interface with `stripe-go` and fake implementations
+- [ ] `payments` + `idempotency_keys` migrations
+- [ ] Idempotency middleware (capture, replay, hash-mismatch detection)
+- [ ] Charge on purchase: PaymentIntent created before the ticket claim commits; failure rolls back
+- [ ] Refund on cancel, guarded by the unique `stripe_refund_id`
+- [ ] Forward the idempotency key to Stripe via `SetIdempotencyKey`
+- [ ] Unit tests against the fake, covering the replay and hash-mismatch paths
+
+**Done when:** k6 fires the same idempotency key 100× concurrently and the Stripe test dashboard
+shows exactly one PaymentIntent.
+
+### Phase 3 — Kafka ⬜
+
+- [ ] Kafka in KRaft mode in compose; topics auto-created on boot
+- [ ] `outbox` migration with the partial index
+- [ ] Outbox writes inside the purchase and cancellation transactions
+- [ ] Relay goroutine: poll → produce → mark published, with backoff
+- [ ] Notification worker as a consumer group, idempotent on `(ticket_id, event_type)`
+- [ ] `notifications` table as the visible proof the async path ran
+- [ ] Integration test: purchase → assert the notification row appears
+
+**Done when:** a purchase through the UI produces a `ticket.purchased` message and a notification row,
+and killing the relay mid-run loses no events on restart.
+
+### Phase 4 — Frontend + observability ⬜
+
+- [ ] Event detail page with Stripe Elements checkout
+- [ ] "My tickets" page with QR receipts and cancel flow
+- [ ] `GET /events/user` — events the caller holds tickets for
+- [ ] `X-Request-Id` generated at the gateway, propagated downstream, logged everywhere
+- [ ] Structured JSON logging
+- [ ] Architecture diagram and k6 results in this README
 
 ---
 
-## 12) Glossary
-- **JWT**: signed auth token containing claims (`user_id`, `email`, `exp`)
-- **CORS**: browser policy requiring cross-origin headers
-- **Return-to-pool**: cancelled ticket becomes available again
-- **Receipt**: endpoint returning ticket info + QR code in base64
-- **Inventory**: pool of unowned tickets for an event
+## Running it
+
+### Full stack
+
+```bash
+make up      # start everything (Postgres, Kafka, all four services)
+make seed    # admin user + sample event + inventory
+make logs    # tail
+make down
+```
+
+### Services individually
+
+Each service is its own Go module; run from its directory. Postgres must be up first.
+
+```bash
+cd services/api-gateway   && go run cmd/main.go   # :8000
+cd services/user-service  && go run cmd/main.go   # :8081
+cd services/event-service && go run cmd/main.go   # :8082
+cd services/ticket-service && go run cmd/main.go  # :8083
+```
+
+### Frontend
+
+```bash
+cd frontend/event-ticketing-frontend
+npm run dev     # :3000
+```
+
+### Migrations
+
+```bash
+migrate -path db/migrations \
+  -database "postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable" up
+```
+
+### Load tests
+
+```bash
+k6 run tests/load/purchase_contention.js
+k6 run tests/load/idempotency.js
+```
+
+### Environment
+
+Each service loads `.env` via `godotenv`. Dev defaults:
+
+```bash
+DATABASE_URL=postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable
+JWT_SECRET=my_secret_key_123
+KAFKA_BROKERS=localhost:9092
+STRIPE_SECRET_KEY=sk_test_...        # test mode only
+```
+
+The gateway additionally needs `USER_SERVICE_URL`, `EVENT_SERVICE_URL`, `TICKET_SERVICE_URL`.
+
+> `.env` files are gitignored and never committed. Copy `.env.example` in each service directory and
+> fill in local values; under Docker Compose the environment is supplied by the compose file instead.
+
+---
+
+## Known simplifications
+
+Deliberate scope cuts, listed so they can be discussed rather than discovered:
+
+- **One shared database.** Real microservices own their data. Here all four share a Postgres
+  instance, and `ticket-service` reads `events` and `users` directly. The migration path is
+  per-service schemas, then per-service databases, with cross-service reads replaced by API calls or
+  by consuming the Kafka stream.
+- **JWT in `localStorage`.** Vulnerable to XSS; httpOnly cookies with CSRF protection would be the
+  production choice.
+- **No seat selection.** Tickets are a fungible pool. Reserved seating changes the claim from "any
+  available row" to "this specific row," which removes `SKIP LOCKED` as an option.
+- **No hold/reservation window.** Real ticketing holds inventory for a few minutes during checkout.
+  This claims at purchase time, so a Stripe failure rolls back rather than releasing a timed hold.
+- **Single-region, no replicas.** Read replicas would require handling replication lag on
+  read-after-write.

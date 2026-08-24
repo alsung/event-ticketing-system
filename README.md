@@ -195,6 +195,12 @@ Genuinely evaluated, and worth being able to defend:
 Kafka is chosen for the durable replayable log and independent consumer groups. Running it in
 **KRaft mode** drops the ZooKeeper dependency entirely.
 
+The Go client is **`segmentio/kafka-go`**. The obvious alternative, `confluent-kafka-go`, is ruled out
+by an existing constraint rather than preference: it wraps librdkafka and requires cgo, while these
+images build with `CGO_ENABLED=0` onto `distroless/static`. `twmb/franz-go` is the faster pure-Go
+option and was the runner-up; `kafka-go` wins on readability for a producer and a single consumer
+group at this scale.
+
 ### 5. Layered structure in one service, not all four
 
 `ticket-service` is split into three layers; the other services are not.
@@ -228,7 +234,44 @@ The cost, stated plainly: for simple reads like `GET /tickets/available`, the se
 pass-through that adds no value. It is kept anyway, because two competing patterns inside one package
 is more expensive to read than one uniform pattern with a few thin methods.
 
-### 6. Topics
+### 6. Module boundaries and dependency direction
+
+The repository is five Go modules: four services and a shared `pkg`. The rule governing `pkg` is
+that **a module may only carry dependencies it uses at runtime**, so `pkg` is split by dependency
+footprint rather than by convenience.
+
+| Package | Dependencies | Consumers |
+|---|---|---|
+| `pkg/httpx` | stdlib only | all four services |
+| `pkg/auth` | `golang-jwt/v5` | all four services |
+| `pkg/database` | `pgx/v5` | user, event, ticket — **never the gateway** |
+
+The original layout bundled `Logging` and `IsAdmin` together in `pkg/middleware`. Because `IsAdmin`
+opens a database connection, every consumer of the logging middleware inherited `pgx` — including the
+API gateway, which has no database. `IsAdmin` is a domain query, not a cross-cutting concern, so it
+moves into ticket-service's store layer and the gateway sheds Postgres entirely.
+
+The same rule keeps **Stripe and Kafka out of `pkg`**. Both are used only by ticket-service, so both
+live there. Putting them in the shared module would grow a payment SDK and a Kafka client into the
+gateway, the user service and the catalog service, none of which have any use for them.
+
+**One JWT library, one verification path.** The codebase previously signed tokens with
+`golang-jwt/jwt` v3 in user-service, parsed them with v3 in `pkg/middleware`, and verified them with
+v5 at the gateway — three code paths across two incompatible majors, one of them unmaintained. Worse,
+only the gateway's path pinned the signing algorithm, so a request reaching a service directly could
+present a token signed with `none`. Everything is unified on v5 behind `pkg/auth`, which pins the
+algorithm in a single place.
+
+**Only the gateway is published.** Compose previously exposed ports 8081-8083, which made the
+"gateway is the sole entry point" claim false and allowed the auth bypass above. The base compose file
+now publishes only the gateway and Postgres; a `docker-compose.override.yml` re-exposes the service
+ports when debugging one directly.
+
+A committed `go.work` ties the five modules together so `go build ./...` and `go test ./...` work from
+the repository root. Docker builds are unaffected: each image copies only `pkg` and its own service,
+resolving through the `replace` directive rather than the workspace.
+
+### 7. Topics
 
 | Topic | Key | Produced when | Consumed by |
 |---|---|---|---|
@@ -373,10 +416,30 @@ no Dockerfile copied a `.env`.
 **Verified:** all 17 smoke checks pass — the public/protected route split, register, login, inventory
 listing, purchase with QR, receipt, and cancel returning the ticket to the pool.
 
-### Phase 1 — Concurrency correctness ⬜
+### Phase 1 — Foundation and concurrency correctness ⬜
 
 Makes the locking claim genuinely true. Highest interview leverage: *"how did you prevent
 overselling"* is the question this project most invites.
+
+Split into two passes. The first settles module boundaries and dependencies so that later phases add
+Stripe and Kafka to a structure that can hold them; the second fixes the concurrency defects.
+
+**Pass A — module boundaries and dependencies**
+
+- [ ] Split `pkg` into `httpx` (stdlib only), `auth` (`golang-jwt/v5`) and `database` (`pgx/v5`), so
+      the gateway stops inheriting Postgres
+- [ ] Move `IsAdmin` out of `pkg/middleware` into ticket-service's store — it is a domain query, not
+      a cross-cutting concern
+- [ ] Unify on `golang-jwt/v5` and pin the signing algorithm in `pkg/auth`. Tokens are currently
+      signed with v3, parsed with v3 in shared middleware, and verified with v5 at the gateway; only
+      the gateway path checks the algorithm
+- [ ] Publish only the gateway and Postgres from the base compose file; move the service ports into
+      `docker-compose.override.yml` for direct debugging
+- [ ] Upgrade and pin: `pgx` v5.10.0, `x/crypto` v0.55.0, `golang-jwt` v5.3.1
+- [ ] Add a committed `go.work`; drop it from `.gitignore`
+- [ ] `make tidy` across all modules and a check that shared dependency versions agree
+
+**Pass B — concurrency correctness**
 
 - [ ] Replace per-request `pgxpool.New` with a process-level pool (`sync.Once`), sized via
       `DB_MAX_CONNS`. Every handler currently builds and tears down an entire connection pool per
@@ -392,7 +455,8 @@ overselling"* is the question this project most invites.
 - [ ] k6 scenario: 100 VUs against an event with exactly 50 tickets
 
 **Done when:** k6 reports exactly 50 × `200` and 50 × `409`, zero `5xx`, and a post-run SQL check
-confirms no ticket has two owners and `count(purchased) = 50`.
+confirms no ticket has two owners and `count(purchased) = 50`. The smoke test still passes, and
+`go mod tidy` leaves no `pgx` entry in `api-gateway/go.mod`.
 
 ### Phase 2 — Stripe ⬜
 
@@ -410,6 +474,7 @@ shows exactly one PaymentIntent.
 ### Phase 3 — Kafka ⬜
 
 - [ ] Kafka in KRaft mode in compose; topics auto-created on boot
+- [ ] `segmentio/kafka-go` in ticket-service only — never in `pkg`
 - [ ] `outbox` migration with the partial index
 - [ ] Outbox writes inside the purchase and cancellation transactions
 - [ ] Relay goroutine: poll → produce → mark published, with backoff

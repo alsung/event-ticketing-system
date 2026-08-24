@@ -27,7 +27,7 @@ func CreateEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close(context.Background())
+	defer func() { _ = db.Close(context.Background()) }()
 
 	_, err = db.Exec(context.Background(),
 		`INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
@@ -41,7 +41,7 @@ func CreateEvent(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"message": "Event created successfully",
 	})
 }
@@ -58,7 +58,7 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close(context.Background())
+	defer func() { _ = db.Close(context.Background()) }()
 
 	rows, err := db.Query(context.Background(),
 		"SELECT id, name, description, location, start_time, end_time, organizer_id, created_at FROM events")
@@ -79,5 +79,5 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(events)
+	_ = json.NewEncoder(w).Encode(events)
 }

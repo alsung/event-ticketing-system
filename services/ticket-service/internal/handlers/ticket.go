@@ -64,7 +64,7 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Transaction error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(context.Background())
+	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	var ticketID uuid.UUID
 	err = tx.QueryRow(context.Background(), `
@@ -105,7 +105,7 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"ticket_id": ticketID,
 		"message":   "Ticket successfully purchased",
 		"qr_code":   qrCodeBase64,
@@ -156,7 +156,7 @@ func ListAvailableTickets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(tickets)
+	_ = json.NewEncoder(w).Encode(tickets)
 }
 
 // CreateTickets allows organizers/admin to create multiple tickets for an event
@@ -223,7 +223,7 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Transaction error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for i := 0; i < req.Quantity; i++ {
 		_, err = tx.Exec(ctx, `
@@ -243,7 +243,7 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"message":  "Tickets created successfully",
 		"quantity": req.Quantity,
 	})
@@ -309,7 +309,7 @@ func GetUserTickets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(tickets)
+	_ = json.NewEncoder(w).Encode(tickets)
 }
 
 // CancelTicket allows users to cancel one of their purchased tickets
@@ -350,7 +350,7 @@ func CancelTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Transaction begin failed", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Ensure ticket belongs to user and is in 'purchased' status
 	var existingStatus string

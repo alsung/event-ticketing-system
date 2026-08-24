@@ -1,0 +1,5 @@
+# Keep local secrets and build artifacts out of the image layers.
+**/.env
+**/main
+**/*.test
+**/db/migrations

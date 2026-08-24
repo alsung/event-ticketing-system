@@ -1,20 +1,15 @@
-FROM golang:1.24 as builder
+# Build context is ./services — see the note in user-service/Dockerfile.
+FROM golang:1.24 AS builder
 
-WORKDIR /app
+WORKDIR /src
+COPY pkg/ ./pkg/
+COPY api-gateway/ ./api-gateway/
 
-COPY go.mod go.sum ./
+WORKDIR /src/api-gateway
 RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api-gateway ./cmd/main.go
 
-COPY . .
-
-RUN go build -o main ./cmd/main.go
-
-FROM gcr.io/distroless/base-debian10
-
-WORKDIR /app
-
-COPY --from=builder /app/main .
-
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/api-gateway /api-gateway
 EXPOSE 8000
-
-CMD ["./main"]
+ENTRYPOINT ["/api-gateway"]

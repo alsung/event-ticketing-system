@@ -264,12 +264,21 @@ algorithm in a single place.
 
 **Only the gateway is published.** Compose previously exposed ports 8081-8083, which made the
 "gateway is the sole entry point" claim false and allowed the auth bypass above. The base compose file
-now publishes only the gateway and Postgres; a `docker-compose.override.yml` re-exposes the service
-ports when debugging one directly.
+now publishes only the gateway and Postgres; the services remain reachable on the internal compose
+network but not from the host. `make up-debug` layers `docker-compose.debug.yml` on top to republish
+them when debugging one directly. That file is deliberately *not* named `docker-compose.override.yml`,
+which Compose loads automatically -- that would re-expose the services by default and undo the
+boundary.
 
-A committed `go.work` ties the five modules together so `go build ./...` and `go test ./...` work from
-the repository root. Docker builds are unaffected: each image copies only `pkg` and its own service,
-resolving through the `replace` directive rather than the workspace.
+Services still verify the token on every request rather than trusting their network position. Closing
+the ports is one layer; authenticating regardless is the other.
+
+A committed `go.work` ties the five modules together, so one `go build` or `go test` invocation can
+span all five with unified dependency resolution, and gopls resolves symbols across module boundaries
+in the editor. Note the workspace root is not itself a module, so patterns must name the modules
+explicitly (`go build ./pkg/... ./api-gateway/...`) rather than a bare `./...`; the `make build-go`
+and `make test` targets wrap this. Docker builds are unaffected: each image copies only `pkg` and its
+own service, resolving through the `replace` directive rather than the workspace.
 
 ### 7. Topics
 
@@ -352,7 +361,7 @@ All routes are called through the gateway at `http://localhost:8000`.
 |---|---|---|---|
 | `POST` | `/users/register` | `{email, password, full_name}` | `{message}` |
 | `POST` | `/users/login` | `{email, password}` | `{token}` |
-| `GET` | `/events` | — | `[Event]` |
+| `GET` | `/events` | — | `[Event]` — gains `?limit=&cursor=` in Phase 4 |
 
 ### Authenticated (`Authorization: Bearer <jwt>`)
 
@@ -360,7 +369,7 @@ All routes are called through the gateway at `http://localhost:8000`.
 |---|---|---|---|
 | `POST` | `/events/create` | `{name, description, location, start_time, end_time}` | `{message}` |
 | `POST` | `/tickets/create` | `{event_id, price, quantity}` | `{message, quantity}` |
-| `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]` |
+| `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]` — becomes `{available_count, tickets[]}` in Phase 4 |
 | `POST` | `/tickets/purchase` | `{event_id, payment_method_id}` | `{ticket_id, qr_code, payment_intent_id}` |
 | `POST` | `/tickets/cancel` | `{ticket_id, reason?}` | `{message, refund_id}` |
 | `GET` | `/tickets/mine` | — | `[PurchasedTicket]` |
@@ -426,18 +435,18 @@ Stripe and Kafka to a structure that can hold them; the second fixes the concurr
 
 **Pass A — module boundaries and dependencies**
 
-- [ ] Split `pkg` into `httpx` (stdlib only), `auth` (`golang-jwt/v5`) and `database` (`pgx/v5`), so
+- [x] Split `pkg` into `httpx` (stdlib only), `auth` (`golang-jwt/v5`) and `database` (`pgx/v5`), so
       the gateway stops inheriting Postgres
-- [ ] Move `IsAdmin` out of `pkg/middleware` into ticket-service's store — it is a domain query, not
+- [x] Move `IsAdmin` out of `pkg/middleware` into ticket-service's store — it is a domain query, not
       a cross-cutting concern
-- [ ] Unify on `golang-jwt/v5` and pin the signing algorithm in `pkg/auth`. Tokens are currently
+- [x] Unify on `golang-jwt/v5` and pin the signing algorithm in `pkg/auth`. Tokens are currently
       signed with v3, parsed with v3 in shared middleware, and verified with v5 at the gateway; only
       the gateway path checks the algorithm
-- [ ] Publish only the gateway and Postgres from the base compose file; move the service ports into
-      `docker-compose.override.yml` for direct debugging
-- [ ] Upgrade and pin: `pgx` v5.10.0, `x/crypto` v0.55.0, `golang-jwt` v5.3.1
-- [ ] Add a committed `go.work`; drop it from `.gitignore`
-- [ ] `make tidy` across all modules and a check that shared dependency versions agree
+- [x] Publish only the gateway and Postgres from the base compose file; move the service ports into
+      `docker-compose.debug.yml`, layered on by `make up-debug`
+- [x] Upgrade and pin: `pgx` v5.10.0, `x/crypto` v0.55.0, `golang-jwt` v5.3.1
+- [x] Add a committed `go.work`; drop it from `.gitignore`
+- [x] `make tidy` across all modules and a check that shared dependency versions agree
 
 **Pass B — concurrency correctness**
 
@@ -489,7 +498,14 @@ and killing the relay mid-run loses no events on restart.
 
 - [ ] Event detail page with Stripe Elements checkout
 - [ ] "My tickets" page with QR receipts and cancel flow
+- [ ] `GET /events/{id}` — event detail, required by the detail page
 - [ ] `GET /events/user` — events the caller holds tickets for
+- [ ] Cursor pagination on `GET /events`, `GET /events/user` and `GET /tickets/mine`
+      (`?limit=&cursor=`, opaque cursor, `next_cursor` in the response). Offset pagination is
+      rejected: it drifts when rows are inserted between pages, and `OFFSET n` makes Postgres walk
+      and discard n rows, so deep pages get progressively slower
+- [ ] `GET /tickets/available` returns a **count plus a page**, not every row. The browse UI needs
+      "42 left", not 42 ticket objects, and the current unbounded response grows with inventory
 - [ ] `X-Request-Id` generated at the gateway, propagated downstream, logged everywhere
 - [ ] Structured JSON logging
 - [ ] Architecture diagram and k6 results in this README
@@ -501,9 +517,15 @@ and killing the relay mid-run loses no events on restart.
 ### Full stack
 
 ```bash
-make up      # start everything (Postgres, Kafka, all four services)
-make seed    # admin user + sample event + inventory
-make logs    # tail
+make up         # start everything (Postgres, migrations, all four services)
+make up-debug   # same, but republish service ports 8081-8083 on the host
+make go-build   # compile all five Go modules
+make go-test    # test all five Go modules
+make tidy       # go mod tidy in every module
+make deps-check # fail if shared dependency versions diverge
+make seed       # admin user + sample event + inventory
+make smoke      # end-to-end check through the gateway
+make logs       # tail
 make down
 ```
 
@@ -569,6 +591,8 @@ Deliberate scope cuts, listed so they can be discussed rather than discovered:
   production choice.
 - **No seat selection.** Tickets are a fungible pool. Reserved seating changes the claim from "any
   available row" to "this specific row," which removes `SKIP LOCKED` as an option.
+- **No pagination until Phase 4.** Every list endpoint returns its full result set. Fine at seed
+  scale, wrong at any real size.
 - **No hold/reservation window.** Real ticketing holds inventory for a few minutes during checkout.
   This claims at purchase time, so a Stripe failure rolls back rather than releasing a timed hold.
 - **Single-region, no replicas.** Read replicas would require handling replication lag on

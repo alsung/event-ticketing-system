@@ -17,8 +17,7 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-# Go workspace file
-go.work
+# Go workspace sum (go.work itself is committed - see README design decision 6)
 go.work.sum
 
 # env file

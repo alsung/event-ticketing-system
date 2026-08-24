@@ -1,5 +1,5 @@
 # Build context is ./services — see the note in user-service/Dockerfile.
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 
 WORKDIR /src
 COPY pkg/ ./pkg/

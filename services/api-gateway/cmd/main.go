@@ -6,7 +6,7 @@ import (
 
 	"github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported"
 	exportedMiddleware "github.com/alsung/event-ticketing-system/services/api-gateway/gateway/exported/middleware"
-	sharedMiddleware "github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/joho/godotenv"
 )
 
@@ -24,7 +24,7 @@ func main() {
 	// CORS sits outside auth so that preflight OPTIONS short-circuits before any
 	// token check, and so 401 responses still carry the headers the browser needs
 	// to surface the real status instead of an opaque network error.
-	handler := sharedMiddleware.Logging(
+	handler := httpx.Logging(
 		exportedMiddleware.CORSMiddleware(gatewayHandler),
 	)
 

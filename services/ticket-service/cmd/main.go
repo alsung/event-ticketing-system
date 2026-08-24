@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/handlers"
 	"github.com/joho/godotenv"
 )
@@ -26,7 +26,7 @@ func main() {
 	mux.HandleFunc("/tickets/receipt", handlers.GetTicketReceipt)
 	// mux.HandleFunc("/tickets/purchased", handlers.ListPurchasedTickets)
 
-	handlerWithMiddleware := middleware.Logging(mux)
+	handlerWithMiddleware := httpx.Logging(mux)
 
 	log.Println("Ticket service running on :8083")
 	if err := http.ListenAndServe(":8083", handlerWithMiddleware); err != nil {

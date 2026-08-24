@@ -11,16 +11,22 @@ import (
 )
 
 func main() {
+	// .env is a local-development convenience. Under Docker Compose the
+	// environment is supplied by the compose file, so a missing file is normal.
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Failed to load .env file")
+		log.Println("no .env file loaded, using environment variables")
 	}
 
 	gatewayHandler := exported.NewGatewayHandler()
 
-	// Apply middleware: CORS -> JWT -> Logging
-	handler := exportedMiddleware.CORSMiddleware(gatewayHandler)
-	handler = exportedMiddleware.JWTMiddleware(handler)
-	handler = sharedMiddleware.Logging(handler)
+	// Logging -> CORS -> gateway (which applies JWT per-route).
+	//
+	// CORS sits outside auth so that preflight OPTIONS short-circuits before any
+	// token check, and so 401 responses still carry the headers the browser needs
+	// to surface the real status instead of an opaque network error.
+	handler := sharedMiddleware.Logging(
+		exportedMiddleware.CORSMiddleware(gatewayHandler),
+	)
 
 	http.Handle("/", handler)
 

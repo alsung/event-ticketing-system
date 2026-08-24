@@ -1,15 +1,18 @@
-# Stage 1: Build the service
+# Build context is ./services (not this directory), because every service go.mod
+# carries a `replace ... => ../pkg` directive pointing at the shared module. With
+# a per-service context that path sits outside the build and `go mod download`
+# cannot resolve it.
 FROM golang:1.24 AS builder
 
-WORKDIR /app
-COPY . .
-RUN go mod tidy
-RUN go build -o user-service main.go
+WORKDIR /src
+COPY pkg/ ./pkg/
+COPY user-service/ ./user-service/
 
-# Stage 2: Run the service
-FROM gcr.io/distroless/base-debian10
+WORKDIR /src/user-service
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/user-service ./cmd/main.go
 
-WORKDIR /
-COPY --from=builder /app/user-service /user-service
-
-ENTRYPOINT [ "/user-service" ]
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/user-service /user-service
+EXPOSE 8081
+ENTRYPOINT ["/user-service"]

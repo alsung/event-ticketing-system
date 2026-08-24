@@ -12,12 +12,15 @@ type GatewayHandler struct {
 	client internal.Client
 }
 
-// Define the list of routes that require JWT auth
-var protectedPaths = []string{
+// protectedPrefixes lists the routes that require a valid JWT. Everything else
+// is public: POST /users/register, POST /users/login and GET /events.
+//
+// This is the single place auth is enforced. It used to be applied here *and*
+// globally in cmd/main.go, where the global pass exempted only /users/*, so
+// GET /events demanded a token despite being a public browse endpoint.
+var protectedPrefixes = []string{
 	"/events/create",
-	"/tickets/create",
-	"/tickets/purchase",
-	"/tickets/mine",
+	"/tickets/",
 }
 
 // NewGatewayHandler creates a handler that proxies requests internally
@@ -28,23 +31,25 @@ func NewGatewayHandler() http.Handler {
 }
 
 func (g *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+	forward := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := g.client.ForwardRequest(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		}
+	})
 
-	// Check if the path is protected and needs JWT auth
-	for _, protected := range protectedPaths {
-		if strings.HasPrefix(path, protected) {
-			// Wrap with JWT middleware
-			middleware.JWTMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if err := g.client.ForwardRequest(w, r); err != nil {
-					http.Error(w, err.Error(), http.StatusBadGateway)
-				}
-			})).ServeHTTP(w, r)
-			return
+	if isProtected(r.URL.Path) {
+		middleware.JWTMiddleware(forward).ServeHTTP(w, r)
+		return
+	}
+
+	forward.ServeHTTP(w, r)
+}
+
+func isProtected(path string) bool {
+	for _, prefix := range protectedPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
 		}
 	}
-
-	// Public route - forward directly
-	if err := g.client.ForwardRequest(w, r); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-	}
+	return false
 }

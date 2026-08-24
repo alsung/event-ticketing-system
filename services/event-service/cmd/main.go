@@ -10,8 +10,10 @@ import (
 )
 
 func main() {
+	// .env is a local-development convenience. Under Docker Compose the
+	// environment is supplied by the compose file, so a missing file is normal.
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Failed to load .env file")
+		log.Println("no .env file loaded, using environment variables")
 	}
 
 	mux := http.NewServeMux()

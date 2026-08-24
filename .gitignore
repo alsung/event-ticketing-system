@@ -31,3 +31,6 @@ node_modules/
 
 # compiled service binaries
 services/*/main
+
+# Claude Code local config and vendored skills
+.claude/

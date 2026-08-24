@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same branch rather than paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go build, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          # The workspace root is not a module, so point the cache at the
+          # individual module sums.
+          cache-dependency-path: services/*/go.sum
+
+      - name: Build all modules
+        run: make go-build
+
+      - name: Vet all modules
+        run: cd services && go vet ./pkg/... ./api-gateway/... ./user-service/... ./event-service/... ./ticket-service/...
+
+      - name: Test all modules
+        run: make go-test
+
+      - name: Shared dependency versions agree
+        run: make deps-check
+
+      - name: go.mod files are tidy
+        run: |
+          make tidy
+          if ! git diff --quiet -- 'services/*/go.mod' 'services/*/go.sum'; then
+            echo "::error::go.mod or go.sum is not tidy — run 'make tidy' and commit the result"
+            git diff -- 'services/*/go.mod' 'services/*/go.sum'
+            exit 1
+          fi
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    # No config file yet: running golangci-lint's defaults and tightening as the
+    # codebase grows. Phase 1 pass B adds a .golangci.yml.
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [pkg, api-gateway, user-service, event-service, ticket-service]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: services/*/go.sum
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: services/${{ matrix.module }}
+
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/event-ticketing-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/event-ticketing-frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build

@@ -14,7 +14,7 @@ consistent. Most of this document is about how that is done and why.
 
 | Phase | Scope | State |
 |---|---|---|
-| **0** | Reproducible local stack (`docker compose up` works end to end) | 🔨 In progress |
+| **0** | Reproducible local stack (`docker compose up` works end to end) | ✅ Complete |
 | **1** | Concurrency correctness + k6 load validation | ⬜ Not started |
 | **2** | Stripe charge/refund with idempotency keys | ⬜ Not started |
 | **3** | Kafka async flows via transactional outbox | ⬜ Not started |
@@ -345,20 +345,33 @@ server fault.
 
 ## Delivery phases
 
-### Phase 0 — Reproducible local stack 🔨
+### Phase 0 — Reproducible local stack ✅
 
-The repository must clone and run. Currently `docker-compose.yml` cannot start: the event service
-carries an `image: alpine` placeholder that overrides its build, services receive `DB_URL` while the
-code reads `DATABASE_URL`, and the gateway points at `http://user-service:8081` while the compose
-service is named `user_service`.
+The repository must clone and run. It could not. No service image could build: each build context was
+the service's own directory, while every `go.mod` carries a `replace ... => ../pkg` directive pointing
+outside it, so `go mod download` could not resolve the shared module. Had they built, every container
+would still have exited on boot — each `main.go` called `godotenv.Load()` followed by `log.Fatal`, and
+no Dockerfile copied a `.env`.
 
-- [ ] Fix compose service names, env var names, remove the `alpine` placeholder
-- [ ] Add a healthcheck-gated `depends_on` so services wait for Postgres
-- [ ] Run migrations automatically on startup
-- [ ] Add a `make seed` target creating an admin, an event, and inventory
-- [ ] Commit the stray built binaries currently tracked (`services/*/main`) to `.gitignore`
+- [x] Move all four build contexts to `./services` so the shared `pkg` module resolves
+- [x] Treat a missing `.env` as normal and read configuration from the environment
+- [x] Build user-service from `cmd/main.go` rather than a stray root `main.go` stub that printed one
+      line and exited
+- [x] Fix compose service names and env var names; remove the `alpine` placeholder shadowing the
+      event-service build
+- [x] Gate startup on a Postgres healthcheck and a completed migration run
+- [x] Run migrations automatically on `make up`
+- [x] Port `ticket_cancellation_logs` into `db/migrations` — it existed only in an orphaned directory,
+      so cancellation failed at runtime on any fresh database
+- [x] Collapse duplicated gateway JWT enforcement to a single point, reorder CORS outside auth, and
+      pin the JWT signing algorithm
+- [x] Add `make seed` creating an admin, an upcoming event, and 50 tickets
+- [x] Untrack the stray compiled binaries (`services/*/main`)
 
-**Done when:** `git clone && make up && make seed` yields a working system, verified by a smoke script.
+**Done when:** `make clean && make up && make seed && make smoke` passes from scratch.
+
+**Verified:** all 17 smoke checks pass — the public/protected route split, register, login, inventory
+listing, purchase with QR, receipt, and cancel returning the ticket to the pool.
 
 ### Phase 1 — Concurrency correctness ⬜
 

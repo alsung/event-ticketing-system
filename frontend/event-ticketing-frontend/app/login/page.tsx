@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { setToken } from '@/context/UserContext';
 
 export default function LoginPage() {
     const router = useRouter();
@@ -30,8 +31,11 @@ export default function LoginPage() {
                 return;
             }
 
-            // Save token to localStorage
-            localStorage.setItem('token', data.token);
+            // Go through setToken rather than localStorage directly: it also
+            // notifies the useSyncExternalStore subscribers, so the navbar
+            // updates without a reload. A bare localStorage.setItem is invisible
+            // to the current tab, since the storage event only fires in others.
+            setToken(data.token);
             router.push('/events'); // Redirect after login (you can change the path at any time)
         } catch (err) {
             setError('Something went wrong. Please try again.');

@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/alsung/event-ticketing-system/services/event-service/internal/handlers"
-	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/joho/godotenv"
 )
 
@@ -20,7 +20,7 @@ func main() {
 	mux.HandleFunc("/events", handlers.GetEvents)          // GET events
 	mux.HandleFunc("/events/create", handlers.CreateEvent) // POST create events
 
-	handlerWithMiddleware := middleware.Logging(mux)
+	handlerWithMiddleware := httpx.Logging(mux)
 
 	log.Println("Event service running on :8082")
 	if err := http.ListenAndServe(":8082", handlerWithMiddleware); err != nil {

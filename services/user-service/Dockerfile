@@ -2,7 +2,7 @@
 # carries a `replace ... => ../pkg` directive pointing at the shared module. With
 # a per-service context that path sits outside the build and `go mod download`
 # cannot resolve it.
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 
 WORKDIR /src
 COPY pkg/ ./pkg/

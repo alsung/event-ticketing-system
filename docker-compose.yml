@@ -5,6 +5,10 @@
 # Boot order is enforced with conditions rather than plain depends_on: services
 # wait for Postgres to pass its healthcheck and for migrations to run to
 # completion, so a fresh `make up` converges without manual steps.
+#
+# Only the gateway and Postgres publish ports. The three services behind the
+# gateway are reachable only on the internal compose network, so the gateway is
+# genuinely the sole entry point rather than merely the intended one.
 
 services:
   postgres:
@@ -43,8 +47,8 @@ services:
     build:
       context: ./services
       dockerfile: user-service/Dockerfile
-    ports:
-      - "8081:8081"
+    # No published ports: the gateway is the only entry point. Use
+    # `make up-debug` to expose 8081 on the host for direct debugging.
     environment:
       DATABASE_URL: postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
       JWT_SECRET: my_secret_key_123
@@ -58,8 +62,8 @@ services:
     build:
       context: ./services
       dockerfile: event-service/Dockerfile
-    ports:
-      - "8082:8082"
+    # No published ports: the gateway is the only entry point. Use
+    # `make up-debug` to expose 8082 on the host for direct debugging.
     environment:
       DATABASE_URL: postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
       JWT_SECRET: my_secret_key_123
@@ -73,8 +77,8 @@ services:
     build:
       context: ./services
       dockerfile: ticket-service/Dockerfile
-    ports:
-      - "8083:8083"
+    # No published ports: the gateway is the only entry point. Use
+    # `make up-debug` to expose 8083 on the host for direct debugging.
     environment:
       DATABASE_URL: postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
       JWT_SECRET: my_secret_key_123

@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/alsung/event-ticketing-system/services/user-service/internal/handlers"
 	"github.com/joho/godotenv"
 )
@@ -20,7 +20,7 @@ func main() {
 	mux.HandleFunc("/users/register", handlers.RegisterUser)
 	mux.HandleFunc("/users/login", handlers.LoginUser)
 
-	handlerWithMiddleware := middleware.Logging(mux)
+	handlerWithMiddleware := httpx.Logging(mux)
 
 	log.Println("User Service running on :8081")
 	if err := http.ListenAndServe(":8081", handlerWithMiddleware); err != nil {

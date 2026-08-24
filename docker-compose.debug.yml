@@ -1,0 +1,17 @@
+# Opt-in overlay that republishes the internal service ports for direct
+# debugging. Deliberately NOT named docker-compose.override.yml, which Compose
+# loads automatically -- that would re-expose the services by default and undo
+# the boundary the base file establishes.
+#
+#   make up-debug     (or: docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d)
+
+services:
+  user-service:
+    ports:
+      - "8081:8081"
+  event-service:
+    ports:
+      - "8082:8082"
+  ticket-service:
+    ports:
+      - "8083:8083"

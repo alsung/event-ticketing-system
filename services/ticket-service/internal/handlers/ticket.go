@@ -8,11 +8,26 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/alsung/event-ticketing-system/services/pkg/auth"
 	"github.com/alsung/event-ticketing-system/services/pkg/database"
-	"github.com/alsung/event-ticketing-system/services/pkg/middleware"
+	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/store"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/utils"
 	"github.com/google/uuid"
 )
+
+// callerID verifies the bearer token and returns the authenticated user.
+//
+// The gateway already verified this token, but services must not rely on that:
+// compose no longer publishes their ports, yet defence in depth means a service
+// still authenticates every request it serves rather than trusting its network
+// position.
+func callerID(r *http.Request) (uuid.UUID, error) {
+	claims, err := auth.DefaultVerifier().FromRequest(r)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return claims.UserID, nil
+}
 
 // PurchaseTicket handles ticket purchasing logic
 func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +46,7 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Securely get userID from JWT
-	userID, err := middleware.GetUserIDFromJWT(r)
+	userID, err := callerID(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -165,17 +180,11 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 
 	// Extract user ID from JWT
-	userID, err := middleware.GetUserIDFromJWT(r)
+	userID, err := callerID(r)
 	log.Println("userID", userID)
 	if err != nil {
 		log.Println("err", err)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	isAdmin, err := middleware.IsAdmin(ctx, userID)
-	if err != nil {
-		http.Error(w, "Error checking admin status", http.StatusInternalServerError)
 		return
 	}
 
@@ -185,6 +194,12 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
+
+	isAdmin, err := store.IsAdmin(ctx, db, userID)
+	if err != nil {
+		http.Error(w, "Error checking admin status", http.StatusInternalServerError)
+		return
+	}
 
 	// Validate that the user is the organizer of the event or admin
 	var organizerID uuid.UUID
@@ -243,7 +258,7 @@ func GetUserTickets(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.Background()
 
-	userID, err := middleware.GetUserIDFromJWT(r)
+	userID, err := callerID(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -317,7 +332,7 @@ func CancelTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	userID, err := middleware.GetUserIDFromJWT(r)
+	userID, err := callerID(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -416,7 +431,7 @@ func GetTicketReceipt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	userID, err := middleware.GetUserIDFromJWT(r)
+	userID, err := callerID(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return

@@ -12,4 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api-gateway ./cmd/main.go
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/api-gateway /api-gateway
 EXPOSE 8000
+# The runtime image is distroless: no shell, no curl. The binary probes itself.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["/api-gateway", "-healthcheck"]
+
 ENTRYPOINT ["/api-gateway"]

@@ -99,10 +99,16 @@ services:
       EVENT_SERVICE_URL: http://event-service:8082
       TICKET_SERVICE_URL: http://ticket-service:8083
       JWT_SECRET: my_secret_key_123
+    # service_healthy, not service_started: each service image carries a
+    # HEALTHCHECK that probes its own /health/ready, so the gateway only starts
+    # once its upstreams can actually serve.
     depends_on:
-      - user-service
-      - event-service
-      - ticket-service
+      user-service:
+        condition: service_healthy
+      event-service:
+        condition: service_healthy
+      ticket-service:
+        condition: service_healthy
 
 volumes:
   postgres_data:

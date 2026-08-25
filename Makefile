@@ -1,4 +1,4 @@
-.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test tidy deps-check
+.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test tidy deps-check load
 
 DB_URL ?= postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable
 
@@ -41,6 +41,15 @@ seed:
 ## smoke: end-to-end check of the full user journey through the gateway
 smoke:
 	./tests/smoke/smoke.sh
+
+## load: reseed, race 100 VUs for 50 tickets, then verify the database state
+## Runs k6 in Docker so no local install is needed.
+load: seed
+	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
+		-e GATEWAY=http://host.docker.internal:8000 \
+		--add-host=host.docker.internal:host-gateway \
+		grafana/k6:latest run /scripts/purchase_contention.js
+	./tests/load/verify.sh
 
 ## reset: tear everything down and rebuild from scratch, seeded and verified
 reset: clean up

@@ -12,4 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/ticket-service ./cmd/main.go
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/ticket-service /ticket-service
 EXPOSE 8083
+# The runtime image is distroless: no shell, no curl. The binary probes itself.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["/ticket-service", "-healthcheck"]
+
 ENTRYPOINT ["/ticket-service"]

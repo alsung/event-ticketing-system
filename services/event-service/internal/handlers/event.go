@@ -1,12 +1,11 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
-	"github.com/alsung/event-ticketing-system/services/event-service/internal/database"
 	"github.com/alsung/event-ticketing-system/services/event-service/internal/models"
+	"github.com/alsung/event-ticketing-system/services/pkg/database"
 )
 
 // CreateEvent handles creating new events
@@ -22,14 +21,15 @@ func CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(context.Background())
+	ctx := r.Context()
+
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = db.Close(context.Background()) }()
 
-	_, err = db.Exec(context.Background(),
+	_, err = db.Exec(ctx,
 		`INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		event.Name, event.Description, event.Location, event.StartTime, event.EndTime, event.OrganizerID)
@@ -53,14 +53,15 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(context.Background())
+	ctx := r.Context()
+
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = db.Close(context.Background()) }()
 
-	rows, err := db.Query(context.Background(),
+	rows, err := db.Query(ctx,
 		"SELECT id, name, description, location, start_time, end_time, organizer_id, created_at FROM events")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

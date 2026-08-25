@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,14 +142,15 @@ func ListAvailableTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(context.Background())
+	ctx := r.Context()
+
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
 
-	rows, err := db.Query(context.Background(), `
+	rows, err := db.Query(ctx, `
 		SELECT id, price, created_at FROM tickets
 		WHERE event_id = $1 AND status = 'available'
 	`, eventID)
@@ -199,7 +199,7 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := r.Context()
 
 	// Extract user ID from JWT
 	userID, err := callerID(r)
@@ -210,12 +210,11 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(ctx)
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
 
 	isAdmin, err := store.IsAdmin(ctx, db, userID)
 	if err != nil {
@@ -278,7 +277,7 @@ func GetUserTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := r.Context()
 
 	userID, err := callerID(r)
 	if err != nil {
@@ -286,12 +285,11 @@ func GetUserTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(ctx)
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
 
 	rows, err := db.Query(ctx, `
 		SELECT id, event_id, price, status, purchased_at, qr_code
@@ -456,19 +454,18 @@ func GetTicketReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := r.Context()
 	userID, err := callerID(r)
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	db, err := database.NewDatabaseConnection(ctx)
+	db, err := database.Pool(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database unavailable", http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
 
 	var (
 		eventID     uuid.UUID

@@ -15,7 +15,7 @@ consistent. Most of this document is about how that is done and why.
 | Phase | Scope | State |
 |---|---|---|
 | **0** | Reproducible local stack (`docker compose up` works end to end) | ✅ Complete |
-| **1** | Concurrency correctness + k6 load validation | ⬜ Not started |
+| **1** | Concurrency correctness + k6 load validation | ✅ Complete |
 | **2** | Stripe charge/refund with idempotency keys | ⬜ Not started |
 | **3** | Kafka async flows via transactional outbox | ⬜ Not started |
 | **4** | Frontend purchase/cancel flows + observability | ⬜ Not started |
@@ -425,7 +425,7 @@ no Dockerfile copied a `.env`.
 **Verified:** all 17 smoke checks pass — the public/protected route split, register, login, inventory
 listing, purchase with QR, receipt, and cancel returning the ticket to the pool.
 
-### Phase 1 — Foundation and concurrency correctness ⬜
+### Phase 1 — Foundation and concurrency correctness ✅
 
 Makes the locking claim genuinely true. Highest interview leverage: *"how did you prevent
 overselling"* is the question this project most invites.
@@ -450,22 +450,35 @@ Stripe and Kafka to a structure that can hold them; the second fixes the concurr
 
 **Pass B — concurrency correctness**
 
-- [ ] Replace per-request `pgxpool.New` with a process-level pool (`sync.Once`), sized via
+- [x] Replace per-request `pgxpool.New` with a process-level pool (`sync.Once`), sized via
       `DB_MAX_CONNS`. Every handler currently builds and tears down an entire connection pool per
       request, which alone will fail a 100-VU test.
-- [ ] Fix `CancelTicket`: its `SELECT` and `UPDATE` run on `db` rather than `tx`, so the ticket is
+- [x] Fix `CancelTicket`: its `SELECT` and `UPDATE` run on `db` rather than `tx`, so the ticket is
       released outside the transaction and a failed audit-log insert cannot roll it back
-- [ ] Add `FOR UPDATE SKIP LOCKED` to the purchase claim
-- [ ] Move cancellation to `SERIALIZABLE` with a `40001`/`40P01` retry helper
-- [ ] Return `409` for sold-out instead of `500`
-- [ ] Replace `sql.ErrNoRows` comparisons with `pgx.ErrNoRows` (the current check never fires)
-- [ ] Hash passwords with bcrypt; migrate existing rows
-- [ ] Composite index on `tickets (event_id, status)`
-- [ ] k6 scenario: 100 VUs against an event with exactly 50 tickets
+- [x] Add `FOR UPDATE SKIP LOCKED` to the purchase claim
+- [x] Move cancellation to `SERIALIZABLE` with a `40001`/`40P01` retry helper
+- [x] Return `409` for sold-out instead of `500`
+- [x] Replace `sql.ErrNoRows` comparisons with `pgx.ErrNoRows` (the current check never fires)
+- [x] Hash passwords with bcrypt; migrate existing rows
+- [x] Composite index on `tickets (event_id, status)`
+- [x] k6 scenario: 100 VUs against an event with exactly 50 tickets
 
 **Done when:** k6 reports exactly 50 × `200` and 50 × `409`, zero `5xx`, and a post-run SQL check
 confirms no ticket has two owners and `count(purchased) = 50`. The smoke test still passes, and
 `go mod tidy` leaves no `pgx` entry in `api-gateway/go.mod`.
+
+**Result** (`make load`, 100 VUs against 50 tickets):
+
+```
+tickets_purchased..: 50      ✓ count==50
+sold_out_409.......: 50      ✓ count==50
+server_errors_5xx..: 0       ✓ count==0
+checks_succeeded...: 100.00% 400 out of 400
+http_req_duration..: avg=56.01ms med=59.4ms p(95)=67.15ms
+```
+
+Database state after the run: 50 purchased, 0 available, every purchased ticket has an owner, no QR
+code issued twice.
 
 ### Phase 2 — Stripe ⬜
 

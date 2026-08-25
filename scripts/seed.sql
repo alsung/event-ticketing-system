@@ -10,11 +10,16 @@ DELETE FROM ticket_cancellation_logs;
 DELETE FROM tickets;
 DELETE FROM events;
 
-INSERT INTO users (email, password, full_name, is_admin)
-VALUES ('admin@example.com', 'password123', 'Admin User', true)
+-- bcrypt digest of 'password123'. Generated once and pinned here rather than
+-- computed at seed time, because bcrypt cannot be produced in SQL.
+INSERT INTO users (email, password_hash, full_name, is_admin)
+VALUES ('admin@example.com',
+        '$2a$10$VthJ97JNlG4sLwfYb5i.7OVyXZrY1pigGVfXY4ZMuM85Sc61nV6pe',
+        'Admin User', true)
 ON CONFLICT (email) DO UPDATE
-    SET is_admin  = true,
-        full_name = EXCLUDED.full_name;
+    SET is_admin      = true,
+        full_name     = EXCLUDED.full_name,
+        password_hash = EXCLUDED.password_hash;
 
 WITH organizer AS (
     SELECT id FROM users WHERE email = 'admin@example.com'

@@ -9,6 +9,7 @@ import (
 	"github.com/alsung/event-ticketing-system/services/pkg/database"
 	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/handlers"
+	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/idempotency"
 	"github.com/joho/godotenv"
 )
 
@@ -42,11 +43,13 @@ func main() {
 		"postgres": database.Ping,
 	}))
 
-	mux.HandleFunc("/tickets/purchase", handlers.PurchaseTicket)
+	// Only the two money-moving routes are deduplicated. A repeated GET is
+	// harmless, and wrapping reads would add a database write to every one.
+	mux.Handle("/tickets/purchase", idempotency.Middleware(http.HandlerFunc(handlers.PurchaseTicket)))
+	mux.Handle("/tickets/cancel", idempotency.Middleware(http.HandlerFunc(handlers.CancelTicket)))
 	mux.HandleFunc("/tickets/create", handlers.CreateTickets)
 	mux.HandleFunc("/tickets/available", handlers.ListAvailableTickets)
 	mux.HandleFunc("/tickets/mine", handlers.GetUserTickets)
-	mux.HandleFunc("/tickets/cancel", handlers.CancelTicket)
 	mux.HandleFunc("/tickets/receipt", handlers.GetTicketReceipt)
 	// mux.HandleFunc("/tickets/purchased", handlers.ListPurchasedTickets)
 

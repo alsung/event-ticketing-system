@@ -1,4 +1,4 @@
-.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test tidy deps-check load
+.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test go-test-db tidy deps-check load load-idem load-capacity
 
 DB_URL ?= postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable
 
@@ -51,6 +51,20 @@ load: seed
 		grafana/k6:latest run /scripts/purchase_contention.js
 	./tests/load/verify.sh
 
+## load-idem: fire many concurrent purchases sharing one idempotency key
+load-idem: seed
+	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
+		-e GATEWAY=http://host.docker.internal:8000 \
+		--add-host=host.docker.internal:host-gateway \
+		grafana/k6:latest run /scripts/idempotency.js
+
+## load-capacity: ramp arrival rate to find where latency degrades
+load-capacity: seed
+	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
+		-e GATEWAY=http://host.docker.internal:8000 \
+		--add-host=host.docker.internal:host-gateway \
+		grafana/k6:latest run /scripts/capacity.js
+
 ## reset: tear everything down and rebuild from scratch, seeded and verified
 reset: clean up
 	@echo "waiting for services to settle..."
@@ -70,6 +84,10 @@ go-build:
 ## go-test: test every module
 go-test:
 	cd services && go test $(GO_MODULES)
+
+## go-test-db: also run the store integration tests against the running Postgres
+go-test-db:
+	cd services && TEST_DATABASE_URL="$(DB_URL)" go test $(GO_MODULES)
 
 ## tidy: run go mod tidy in each module
 tidy:

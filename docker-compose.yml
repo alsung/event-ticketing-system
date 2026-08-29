@@ -82,6 +82,14 @@ services:
     environment:
       DATABASE_URL: postgres://admin:password@postgres:5432/event_ticketing?sslmode=disable
       JWT_SECRET: my_secret_key_123
+      # Interpolated from the gitignored root .env, never written here. Empty is
+      # allowed: with no key the service falls back to the fake provider, so the
+      # stack still starts for anyone who clones this without a Stripe account.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      # Exposed so the capacity test can move it. The purchase path holds a
+      # connection for the length of a locking transaction, so this caps how
+      # many purchases can be in flight at once.
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-25}
     depends_on:
       postgres:
         condition: service_healthy

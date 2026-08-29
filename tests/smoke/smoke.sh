@@ -96,7 +96,10 @@ available_before="$(jq 'length' < "$BODY")"
 pass "$available_before tickets available"
 
 # --- purchase -------------------------------------------------------------
-status="$(req POST /tickets/purchase "$TOKEN" "{\"event_id\":\"$EVENT_ID\"}")"
+# pm_card_visa is Stripe's always-succeeds test payment method. Supplying one is
+# not optional against the real provider: Stripe refuses to confirm a
+# PaymentIntent that has no payment method. The fake provider ignores it.
+status="$(req POST /tickets/purchase "$TOKEN" "{\"event_id\":\"$EVENT_ID\",\"payment_method_id\":\"pm_card_visa\"}")"
 expect "$status" 200 "POST /tickets/purchase"
 TICKET_ID="$(jq -r '.ticket_id' < "$BODY")"
 [ -n "$TICKET_ID" ] && [ "$TICKET_ID" != "null" ] || fail "purchase returned no ticket_id"

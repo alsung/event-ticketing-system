@@ -86,6 +86,10 @@ services:
       # allowed: with no key the service falls back to the fake provider, so the
       # stack still starts for anyone who clones this without a Stripe account.
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      # Exposed so the capacity test can move it. The purchase path holds a
+      # connection for the length of a locking transaction, so this caps how
+      # many purchases can be in flight at once.
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-25}
     depends_on:
       postgres:
         condition: service_healthy

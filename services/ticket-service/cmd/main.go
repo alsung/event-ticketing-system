@@ -10,6 +10,7 @@ import (
 	"github.com/alsung/event-ticketing-system/services/pkg/httpx"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/handlers"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/idempotency"
+	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/outbox"
 	"github.com/joho/godotenv"
 )
 
@@ -36,6 +37,17 @@ func main() {
 		log.Fatalf("database: %v", err)
 	}
 	defer database.Close()
+
+	// The relay runs in-process alongside the server: it publishes this
+	// service's own writes and shares their transaction boundary conceptually.
+	// The consumer is a separate binary, because an independent consumer group
+	// is a real deployment boundary.
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	defer stopRelay()
+	if err := outbox.WaitForTopics(relayCtx); err != nil {
+		log.Printf("kafka: %v; the relay will retry as it polls", err)
+	}
+	go outbox.NewRelay().Run(relayCtx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", httpx.Live())

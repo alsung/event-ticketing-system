@@ -1,0 +1,14 @@
+# Overlay for load runs: blank the Stripe key so ticket-service falls back to the
+# fake provider.
+#
+# The load scenarios fire hundreds of purchases. Against real Stripe that is slow,
+# rate-limited, and measures Stripe's latency rather than this system's. The
+# scenarios exist to prove the locking and idempotency behaviour, neither of
+# which involves the processor.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.load.yml up -d ticket-service
+
+services:
+  ticket-service:
+    environment:
+      STRIPE_SECRET_KEY: ""

@@ -8,6 +8,8 @@ BEGIN;
 
 -- Order matters: payments and cancellation logs both reference tickets, and
 -- tickets reference events. Deleting a parent first trips the foreign key.
+DELETE FROM notifications;
+DELETE FROM outbox;
 DELETE FROM idempotency_keys;
 DELETE FROM payments;
 DELETE FROM ticket_cancellation_logs;

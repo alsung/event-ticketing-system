@@ -1,0 +1,17 @@
+# The notification worker. Same module as ticket-service, different entrypoint.
+# See ticket-service/Dockerfile for why the build context is ./services.
+FROM golang:1.25 AS builder
+
+WORKDIR /src
+COPY pkg/ ./pkg/
+COPY ticket-service/ ./ticket-service/
+
+WORKDIR /src/ticket-service
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker/main.go
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/worker /worker
+# No HEALTHCHECK: the worker serves no port. Liveness is visible through its
+# consumer group lag, which is the metric that actually matters for a consumer.
+ENTRYPOINT ["/worker"]

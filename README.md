@@ -72,13 +72,96 @@ Phase detail, including acceptance criteria, is in [Delivery Phases](#delivery-p
                                                         └─────────────────────┘
 ```
 
+### End-to-end map
+
+One picture: what a person does, the endpoint it hits, the service that answers, and the tables it
+touches. Solid arrows are synchronous request paths; dashed arrows are the asynchronous fan-out.
+
+```mermaid
+flowchart TB
+    User(["👤 Visitor"])
+
+    subgraph Browser["Next.js · localhost:3000"]
+        direction LR
+        P1["/events<br/><i>browse, search</i>"]
+        P2["/events/[id]<br/><i>detail</i>"]
+        P3["/checkout<br/><i>Stripe Elements</i>"]
+        P4["/tickets<br/><i>QR, cancel</i>"]
+    end
+
+    GW{{"api-gateway :8000<br/>CORS → JWT → proxy"}}
+
+    subgraph Services["Internal network only"]
+        direction LR
+        US["user-service :8081"]
+        ES["event-service :8082"]
+        TS["ticket-service :8083"]
+    end
+
+    subgraph DB[("PostgreSQL")]
+        direction LR
+        T_users[("users<br/><i>email UK, password_hash</i>")]
+        T_events[("events<br/><i>search_vector GIN</i>")]
+        T_tickets[("tickets<br/><i>status, qr_code UK</i>")]
+        T_pay[("payments<br/><i>refund_id UK</i>")]
+        T_idem[("idempotency_keys<br/><i>key PK, request_hash</i>")]
+        T_logs[("cancellation_logs")]
+        T_outbox[("outbox<br/><i>published_at</i>")]
+        T_notif[("notifications<br/><i>message_id UK</i>")]
+    end
+
+    STRIPE{{"Stripe API"}}
+    KAFKA{{"Kafka · KRaft"}}
+    WORKER["notification-worker<br/><i>consumer group</i>"]
+
+    User --> Browser
+    P1 -->|"GET /events?q="| GW
+    P2 -->|"GET /events/:id<br/>GET /tickets/available"| GW
+    P3 -->|"POST /tickets/purchase<br/>+ Idempotency-Key"| GW
+    P4 -->|"GET /tickets/mine<br/>POST /tickets/cancel"| GW
+    P3 -.->|"card details<br/>never reach our server"| STRIPE
+
+    GW -->|"/users/*"| US
+    GW -->|"/events/*"| ES
+    GW -->|"/tickets/*"| TS
+
+    US --> T_users
+    ES --> T_events
+    TS --> T_tickets
+    TS --> T_pay
+    TS --> T_idem
+    TS --> T_logs
+    TS --> T_outbox
+    TS -->|"charge · refund"| STRIPE
+
+    T_outbox -.->|"relay polls 1s"| KAFKA
+    KAFKA -.->|"ticket.purchased<br/>ticket.cancelled"| WORKER
+    WORKER -.-> T_notif
+```
+
+### Request and response shapes
+
+| Action | Endpoint | Request | Response | Writes |
+|---|---|---|---|---|
+| Sign up | `POST /users/register` | `{email, password, full_name}` | `{message}` | `users` |
+| Sign in | `POST /users/login` | `{email, password}` | `{token}` | — |
+| Browse | `GET /events?q=` | — | `[{id, name, description, location, start_time, end_time}]` | — |
+| Detail | `GET /events/{id}` | — | `{id, name, description, location, start_time, end_time}` | — |
+| Availability | `GET /tickets/available?event_id=` | — | `[{id, price, created_at}]` | — |
+| **Buy** | `POST /tickets/purchase` | `{event_id, payment_method_id}` + `Idempotency-Key` | `{ticket_id, qr_code, payment_id, amount}` | `tickets`, `payments`, `outbox`, `idempotency_keys` |
+| My tickets | `GET /tickets/mine` | — | `[{id, event_id, price, status, purchased_at, qr_code}]` | — |
+| **Cancel** | `POST /tickets/cancel` | `{ticket_id, reason?}` + `Idempotency-Key` | `{message, refund_id, refund_status}` | `tickets`, `payments`, `cancellation_logs`, `outbox`, `idempotency_keys` |
+
+The two bold rows are the ones that move money. Both are wrapped in the idempotency middleware, both
+write an outbox row inside their transaction, and both are the reason the rest of the design exists.
+
 ### Service responsibilities
 
 | Service | Owns | Notes |
 |---|---|---|
 | **api-gateway** | Edge concerns | Sole entry point for the browser. CORS, JWT verification, request logging, prefix routing (`/users`, `/events`, `/tickets`). Forwards the full path unchanged. |
 | **user-service** | Identity | Registration, login, JWT issuance (`user_id`, `email`, `exp`), `is_admin` flag. |
-| **event-service** | Catalog | Event creation and listing. Owns the definition of "upcoming" (`start_time >= now`). |
+| **event-service** | Catalog | Event creation, listing, detail, and ranked full-text search. |
 | **ticket-service** | Inventory + money | The critical path: minting inventory, the purchase transaction, cancellation/refund, QR receipts, and the outbox relay. |
 
 Services communicate over HTTP through the gateway; the ticket service talks to Stripe directly and
@@ -532,7 +615,9 @@ All routes are called through the gateway at `http://localhost:8000`.
 |---|---|---|---|
 | `POST` | `/users/register` | `{email, password, full_name}` | `{message}` |
 | `POST` | `/users/login` | `{email, password}` | `{token}` |
-| `GET` | `/events` | — | `[Event]`. `?q=` runs a ranked full-text search; gains `?limit=&cursor=` later |
+| `GET` | `/events` | — | `[Event]`, ordered by start time. `?q=` runs a ranked full-text search |
+| `GET` | `/events/{id}` | — | `Event`. `400` on a malformed id, `404` when absent |
+| `GET` | `/health` · `/health/ready` | — | liveness and readiness, on every service |
 
 ### Authenticated (`Authorization: Bearer <jwt>`)
 
@@ -540,7 +625,7 @@ All routes are called through the gateway at `http://localhost:8000`.
 |---|---|---|---|
 | `POST` | `/events/create` | `{name, description, location, start_time, end_time}` | `{message}` |
 | `POST` | `/tickets/create` | `{event_id, price, quantity}` | `{message, quantity}` |
-| `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]` — becomes `{available_count, tickets[]}` in Phase 4 |
+| `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]`. Unbounded; see Known simplifications |
 | `POST` | `/tickets/purchase` | `{event_id, payment_method_id}` | `{ticket_id, qr_code, payment_intent_id}` |
 | `POST` | `/tickets/cancel` | `{ticket_id, reason?}` | `{message, refund_id}` |
 | `GET` | `/tickets/mine` | — | `[PurchasedTicket]` |
@@ -588,7 +673,7 @@ no Dockerfile copied a `.env`.
       so cancellation failed at runtime on any fresh database
 - [x] Collapse duplicated gateway JWT enforcement to a single point, reorder CORS outside auth, and
       pin the JWT signing algorithm
-- [x] Add `make seed` creating an admin, an upcoming event, and 50 tickets
+- [x] Add `make seed` creating an admin, events, and inventory
 - [x] Untrack the stray compiled binaries (`services/*/main`)
 
 **Done when:** `make clean && make up && make seed && make smoke` passes from scratch.
@@ -810,19 +895,31 @@ of Phase 2, was unusable from a browser.**
 ### Full stack
 
 ```bash
-make up         # start everything (Postgres, migrations, all four services)
-make up-debug   # same, but republish service ports 8081-8083 on the host
-make go-build   # compile all five Go modules
-make go-test    # test all five Go modules
-make tidy       # go mod tidy in every module
-make deps-check # fail if shared dependency versions diverge
-make seed       # admin user + sample event + inventory
-make load-idem  # concurrent purchases sharing one idempotency key
-make load-capacity # ramp arrival rate to find where latency degrades
-make smoke      # end-to-end check through the gateway
-make logs       # tail
-make down
+make up             # start everything: Postgres, Kafka, migrations, services, worker
+make seed           # admin user, 12 events, inventory
+make smoke          # end-to-end check through the gateway
+make reset          # clean, up, seed and smoke in one
+
+make down           # stop, keeping the database volume
+make clean          # stop and delete the volume
+make logs           # tail
+make ps             # container status
+make up-debug       # republish service ports 8081-8083 on the host
+
+make load           # 100 VUs race for 50 tickets, then verify the database
+make load-idem      # concurrent purchases sharing one idempotency key
+make load-capacity  # ramp arrival rate to find where latency degrades
+
+make go-build       # compile all five Go modules
+make go-test        # test all five Go modules
+make go-test-db     # also run the store integration tests
+make tidy           # go mod tidy in every module
+make deps-check     # fail if shared dependency versions diverge
+make migrate        # apply migrations without restarting the stack
 ```
+
+The load targets swap ticket-service onto the fake payment provider automatically;
+`make use-real-payments` puts the Stripe path back.
 
 ### Services individually
 

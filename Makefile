@@ -1,4 +1,4 @@
-.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test go-test-db tidy deps-check load load-idem load-capacity
+.PHONY: build up up-debug down clean logs ps migrate seed smoke reset go-build go-test go-test-db tidy deps-check load load-idem load-capacity use-fake-payments use-real-payments
 
 DB_URL ?= postgres://admin:password@localhost:5433/event_ticketing?sslmode=disable
 
@@ -42,9 +42,21 @@ seed:
 smoke:
 	./tests/smoke/smoke.sh
 
+## use-fake-payments: restart ticket-service with the fake payment provider
+## Load scenarios need this: hundreds of real Stripe calls would be slow,
+## rate-limited, and would measure Stripe rather than this system.
+use-fake-payments:
+	docker compose -f docker-compose.yml -f docker-compose.load.yml up -d ticket-service
+	@until curl -sSf -o /dev/null http://localhost:8000/health 2>/dev/null; do sleep 2; done
+
+## use-real-payments: restart ticket-service with STRIPE_SECRET_KEY from .env
+use-real-payments:
+	docker compose up -d ticket-service
+	@until curl -sSf -o /dev/null http://localhost:8000/health 2>/dev/null; do sleep 2; done
+
 ## load: reseed, race 100 VUs for 50 tickets, then verify the database state
 ## Runs k6 in Docker so no local install is needed.
-load: seed
+load: use-fake-payments seed
 	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
 		-e GATEWAY=http://host.docker.internal:8000 \
 		--add-host=host.docker.internal:host-gateway \
@@ -52,14 +64,14 @@ load: seed
 	./tests/load/verify.sh
 
 ## load-idem: fire many concurrent purchases sharing one idempotency key
-load-idem: seed
+load-idem: use-fake-payments seed
 	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
 		-e GATEWAY=http://host.docker.internal:8000 \
 		--add-host=host.docker.internal:host-gateway \
 		grafana/k6:latest run /scripts/idempotency.js
 
 ## load-capacity: ramp arrival rate to find where latency degrades
-load-capacity: seed
+load-capacity: use-fake-payments seed
 	docker run --rm -i -v "$(PWD)/tests/load:/scripts:ro" \
 		-e GATEWAY=http://host.docker.internal:8000 \
 		--add-host=host.docker.internal:host-gateway \

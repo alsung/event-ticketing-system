@@ -11,6 +11,7 @@ import (
 
 	"github.com/alsung/event-ticketing-system/services/pkg/auth"
 	"github.com/alsung/event-ticketing-system/services/pkg/database"
+	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/outbox"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/payments"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/store"
 	"github.com/alsung/event-ticketing-system/services/ticket-service/internal/utils"
@@ -137,7 +138,26 @@ func PurchaseTicket(w http.ResponseWriter, r *http.Request) {
 			AmountCents: priceCents,
 			Currency:    "usd",
 		})
-		return err
+		if err != nil {
+			return err
+		}
+
+		// The event goes into the outbox inside this transaction, not published
+		// to Kafka here. Postgres and Kafka share no transaction, so producing
+		// directly would be a dual write: commit-then-produce loses the event if
+		// this process dies in between, and produce-then-commit announces a
+		// purchase that may roll back. Writing the intent-to-publish alongside
+		// the state change makes the pair atomic; a relay does the producing.
+		return outbox.Enqueue(ctx, tx, outbox.TopicTicketPurchased, ticketID,
+			outbox.TicketPurchased{
+				MessageID:   uuid.New(),
+				EventType:   outbox.TopicTicketPurchased,
+				TicketID:    ticketID,
+				EventID:     req.EventID,
+				UserID:      userID,
+				AmountCents: priceCents,
+				OccurredAt:  time.Now().UTC(),
+			})
 	})
 
 	if err != nil {
@@ -526,6 +546,19 @@ func CancelTicket(w http.ResponseWriter, r *http.Request) {
 			INSERT INTO ticket_cancellation_logs (ticket_id, user_id, event_id, reason)
 			VALUES ($1, $2, $3, $4)
 		`, req.TicketID, userID, eventID, reasonPtr); err != nil {
+			return err
+		}
+
+		if err := outbox.Enqueue(ctx, tx, outbox.TopicTicketCancelled, req.TicketID,
+			outbox.TicketCancelled{
+				MessageID:  uuid.New(),
+				EventType:  outbox.TopicTicketCancelled,
+				TicketID:   req.TicketID,
+				EventID:    eventID,
+				UserID:     userID,
+				Reason:     req.Reason,
+				OccurredAt: time.Now().UTC(),
+			}); err != nil {
 			return err
 		}
 

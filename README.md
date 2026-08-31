@@ -17,7 +17,7 @@ consistent. Most of this document is about how that is done and why.
 | **0** | Reproducible local stack (`docker compose up` works end to end) | ✅ Complete |
 | **1** | Concurrency correctness + k6 load validation | ✅ Complete |
 | **2** | Stripe charge/refund with idempotency keys | ✅ Complete |
-| **3** | Kafka async flows via transactional outbox | ⬜ Not started |
+| **3** | Kafka async flows via transactional outbox | ✅ Complete |
 | **4** | Frontend purchase/cancel flows + observability | ⬜ Not started |
 
 Phase detail, including acceptance criteria, is in [Delivery Phases](#delivery-phases).
@@ -537,19 +537,64 @@ Throughput is not the interesting result, though -- these numbers come from a la
 whole stack in Docker, so they describe relative behaviour, not production capacity. What matters is
 the failure mode: the system degrades by getting slow, and returns zero `5xx` the entire way up.
 
-### Phase 3 — Kafka ⬜
+### Phase 3 — Kafka ✅
 
-- [ ] Kafka in KRaft mode in compose; topics auto-created on boot
-- [ ] `segmentio/kafka-go` in ticket-service only — never in `pkg`
-- [ ] `outbox` migration with the partial index
-- [ ] Outbox writes inside the purchase and cancellation transactions
-- [ ] Relay goroutine: poll → produce → mark published, with backoff
-- [ ] Notification worker as a consumer group, idempotent on `(ticket_id, event_type)`
-- [ ] `notifications` table as the visible proof the async path ran
-- [ ] Integration test: purchase → assert the notification row appears
+- [x] Kafka in KRaft mode in compose, topics created explicitly at startup
+- [x] `segmentio/kafka-go` in ticket-service only, never in `pkg`
+- [x] `outbox` migration with a partial index on unpublished rows
+- [x] Outbox writes inside the purchase and cancellation transactions
+- [x] Relay goroutine: claim, produce, mark published, with a bounded write timeout
+- [x] Notification worker as a separate binary joining its own consumer group
+- [x] `notifications` table as the visible proof the async path ran
+- [x] Verified: purchase produces an event and a notification row, and a broker outage loses nothing
 
-**Done when:** a purchase through the UI produces a `ticket.purchased` message and a notification row,
-and killing the relay mid-run loses no events on restart.
+**Why an outbox at all.** Postgres and Kafka share no transaction. Committing the ticket change and
+then producing loses the event if the process dies in between; producing first announces a purchase
+that may roll back. Neither is acceptable for money-adjacent events. The event is written to a table
+inside the same transaction as the state change, and a relay publishes it afterwards, which makes the
+state change and the intent-to-publish atomic.
+
+The cost is **at-least-once** delivery: the relay can produce and then die before marking the row
+sent. Consumers are therefore idempotent. Exactly-once across a database and a broker is not
+achievable without distributed transactions, and pretending otherwise is worse than admitting it.
+
+**Verified durability.** With the broker stopped, purchases still return `200` and events accumulate
+in the outbox — the payment path does not depend on Kafka being up. Restarting the broker drains the
+backlog and the notifications appear.
+
+#### Two bugs worth recording
+
+**The relay held a transaction across the network call.** The first version wrapped claim, produce
+and mark in one transaction so they would be atomic. Under a broker outage `WriteMessages` blocked
+inside kafka-go's internal retries while holding `FOR UPDATE` locks on the claimed rows — and the
+failure handler, running on the pool, then blocked forever on locks the same relay held. A
+self-deadlock, visible as a connection `idle in transaction` for ten minutes.
+
+It is the same mistake the payment path documents against: never hold a database transaction open
+across a call to another system. The relay now claims, commits, produces with a bounded timeout, then
+marks in a second transaction. Two relays could publish the same batch twice, which at-least-once
+already permits.
+
+**Deduplicating on the wrong identity.** The consumer keyed on `(ticket_id, event_type)`, which
+conflates a message delivered twice with a ticket genuinely bought twice. Cancelling returns a seat
+to the pool, so the same ticket really can be purchased again — and that buyer silently received no
+confirmation. Each event now carries a message id generated at enqueue time, and the consumer
+deduplicates on that. Deduplication belongs on message identity, not on the business entity the
+message is about.
+
+#### Topics
+
+| Topic | Key | Partitions | Consumed by |
+|---|---|---|---|
+| `ticket.purchased` | `ticket_id` | 3 | notification worker |
+| `ticket.cancelled` | `ticket_id` | 3 | notification worker |
+
+Keying by ticket puts every event for one ticket on the same partition, so a cancellation can never
+be consumed before the purchase it refers to.
+
+Topics are created explicitly at startup rather than relying on the broker's auto-creation, which
+only fires on the first produce. A consumer group that joins before that is assigned no partitions
+and does not recover on its own — which is exactly how the worker first came up idle.
 
 ### Phase 4 — Frontend + observability ⬜
 
@@ -581,6 +626,8 @@ make go-test    # test all five Go modules
 make tidy       # go mod tidy in every module
 make deps-check # fail if shared dependency versions diverge
 make seed       # admin user + sample event + inventory
+make load-idem  # concurrent purchases sharing one idempotency key
+make load-capacity # ramp arrival rate to find where latency degrades
 make smoke      # end-to-end check through the gateway
 make logs       # tail
 make down

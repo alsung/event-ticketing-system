@@ -43,6 +43,7 @@ func main() {
 	}))
 	mux.HandleFunc("/events", handlers.GetEvents)          // GET events
 	mux.HandleFunc("/events/create", handlers.CreateEvent) // POST create events
+	mux.HandleFunc("/events/{id}", handlers.GetEvent)      // GET one event
 
 	handlerWithMiddleware := httpx.Logging(mux)
 

@@ -2,78 +2,99 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { setToken } from '@/context/UserContext';
+import { Field } from '@/components/ui/Field';
+import { Button } from '@/components/ui/Button';
+import { Alert } from '@/components/ui/Alert';
+
+const GATEWAY = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'http://localhost:8000';
 
 export default function LoginPage() {
     const router = useRouter();
-
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
+    const [submitting, setSubmitting] = useState(false);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
+        // Guard against the double submit rather than relying on the disabled
+        // attribute alone: a fast second Enter can land before React re-renders.
+        if (submitting) return;
+
         setError('');
+        setSubmitting(true);
 
         try {
-            const res = await fetch('http://localhost:8000/users/login', {
+            const res = await fetch(`${GATEWAY}/users/login`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),
             });
 
-            const data = await res.json();
-
             if (!res.ok) {
-                setError(data.error || 'Login failed');
+                // The API answers 401 with plain text, so read it as text and
+                // fall back to something a person can act on.
+                setError(res.status === 401
+                    ? 'That email and password do not match. Check both and try again.'
+                    : 'Could not sign you in. Please try again.');
                 return;
             }
 
-            // Go through setToken rather than localStorage directly: it also
-            // notifies the useSyncExternalStore subscribers, so the navbar
-            // updates without a reload. A bare localStorage.setItem is invisible
-            // to the current tab, since the storage event only fires in others.
+            const data = await res.json();
             setToken(data.token);
-            router.push('/events'); // Redirect after login (you can change the path at any time)
-        } catch (err) {
-            setError('Something went wrong. Please try again.');
+            router.push('/events');
+        } catch {
+            setError('Could not reach the server. Check your connection and try again.');
+        } finally {
+            setSubmitting(false);
         }
     };
 
     return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-100">
-            <form onSubmit={handleLogin} className="bg-white p-8 rounded shadow-md w-full max-w-md">
-                <h1 className="text-2xl font-semibold mb-6 text-center text-gray-800">Login</h1>
+        <div className="mx-auto flex max-w-sm flex-col gap-6 py-8">
+            <div className="flex flex-col gap-1.5">
+                <h1>Welcome back</h1>
+                <p className="text-[15px] text-text-secondary">
+                    Sign in to see your tickets and book new events.
+                </p>
+            </div>
 
-                {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+            <form onSubmit={handleLogin} className="flex flex-col gap-4" noValidate>
+                {error && <Alert>{error}</Alert>}
 
-                <label className="block mb-2 text-sm font-semibold text-gray-800">Email</label>
-                <input
+                <Field
+                    label="Email"
                     type="email"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={setEmail}
                     required
-                    className="w-full p-2 mb-4 border border-gray-400 rounded text-gray-900"
+                    autoComplete="email"
+                    disabled={submitting}
                 />
 
-                <label className="block mb-2 text-sm font-semibold text-gray-800">Password</label>
-                <input
+                <Field
+                    label="Password"
                     type="password"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={setPassword}
                     required
-                    className="w-full p-2 mb-6 border border-gray-400 rounded text-gray-900"
+                    autoComplete="current-password"
+                    disabled={submitting}
                 />
 
-                <button
-                    type="submit"
-                    className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 transition"
-                >
-                Login
-                </button>
+                <Button type="submit" loading={submitting} fullWidth>
+                    {submitting ? 'Signing in…' : 'Sign in'}
+                </Button>
             </form>
+
+            <p className="text-center text-sm text-text-secondary">
+                New here?{' '}
+                <Link href="/register" className="font-medium text-accent hover:underline">
+                    Create an account
+                </Link>
+            </p>
         </div>
     );
 }

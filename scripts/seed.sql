@@ -27,23 +27,74 @@ ON CONFLICT (email) DO UPDATE
         full_name     = EXCLUDED.full_name,
         password_hash = EXCLUDED.password_hash;
 
+-- A dozen events with varied names, artists, venues and cities, so search has
+-- something to actually discriminate between. One seeded event demonstrates
+-- nothing about ranking.
 WITH organizer AS (
     SELECT id FROM users WHERE email = 'admin@example.com'
-), new_event AS (
+), seeded AS (
     INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
-    SELECT 'Demo Concert',
-           'Seeded event for local development',
-           'San Francisco, CA',
-           NOW() + INTERVAL '7 days',
-           NOW() + INTERVAL '7 days 3 hours',
+    SELECT v.name, v.description, v.location,
+           NOW() + (v.days || ' days')::interval,
+           NOW() + (v.days || ' days')::interval + interval '3 hours',
            organizer.id
-    FROM organizer
+    FROM organizer, (VALUES
+        ('Aurora Vale · Midnight Cartography',
+         'Aurora Vale brings the Midnight Cartography tour to the Fillmore, with support from Low Ceiling.',
+         'San Francisco, CA', 7),
+        ('The Paper Kites of Winter',
+         'An acoustic evening of folk from The Paper Kites of Winter, strings and harmonies only.',
+         'Portland, OR', 9),
+        ('Basalt Drift — Warehouse Session',
+         'Techno producer Basalt Drift plays a four-hour warehouse set. Late doors, no support.',
+         'Detroit, MI', 11),
+        ('Marigold Sound Symphony',
+         'The Marigold Sound Symphony performs Ravel and Debussy under conductor Ines Oyelaran.',
+         'Chicago, IL', 12),
+        ('Neon Harbour Festival · Day One',
+         'Day one of Neon Harbour with Aurora Vale, Basalt Drift and eleven more across three stages.',
+         'Seattle, WA', 14),
+        ('Quiet Machines Live',
+         'Post-rock four-piece Quiet Machines play the whole of Glasshouse front to back.',
+         'Austin, TX', 16),
+        ('Comedy Cellar Late Show',
+         'Stand-up from Priya Raman, Marcus Bell and a surprise headliner. Two drink minimum.',
+         'New York, NY', 18),
+        ('Saltwater Choir · Cathedral Nights',
+         'Saltwater Choir perform by candlelight in the cathedral nave. Limited seating.',
+         'Boston, MA', 21),
+        ('Ember & Ash — Farewell Tour',
+         'The final show of the Ember and Ash farewell tour after fourteen years.',
+         'Nashville, TN', 24),
+        ('Kestrel Jazz Quartet',
+         'Hard bop from the Kestrel Jazz Quartet, two sets with an interval.',
+         'New Orleans, LA', 27),
+        ('Static Bloom Album Launch',
+         'Static Bloom launch Fault Lines with a full live band and a listening session.',
+         'Los Angeles, CA', 30),
+        ('Harbourlight Electronic Weekender',
+         'Ambient and downtempo across a weekend, curated by Basalt Drift.',
+         'Miami, FL', 33)
+    ) AS v(name, description, location, days)
     RETURNING id
 )
+-- 50 tickets on the first event, which the k6 contention scenario expects;
+-- a smaller spread on the rest so the listing looks like a real catalogue.
 INSERT INTO tickets (event_id, price, status)
-SELECT new_event.id, 49.99, 'available'
-FROM new_event, generate_series(1, 50);
+SELECT seeded.id,
+       (30 + (row_number() OVER (ORDER BY seeded.id)) * 7)::numeric(10,2),
+       'available'
+FROM seeded,
+     generate_series(1, 12);
+
+-- Top the first event up to exactly 50 available tickets.
+WITH first_event AS (
+    SELECT id FROM events ORDER BY start_time LIMIT 1
+)
+INSERT INTO tickets (event_id, price, status)
+SELECT first_event.id, 49.99, 'available'
+FROM first_event, generate_series(1, 38);
 
 COMMIT;
 
-\echo 'Seeded: admin@example.com / password123, 1 event, 50 available tickets'
+\echo 'Seeded: admin@example.com / password123, 12 events, 50 tickets on the first'

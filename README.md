@@ -18,7 +18,7 @@ consistent. Most of this document is about how that is done and why.
 | **1** | Concurrency correctness + k6 load validation | ✅ Complete |
 | **2** | Stripe charge/refund with idempotency keys | ✅ Complete |
 | **3** | Kafka async flows via transactional outbox | ✅ Complete |
-| **4** | Frontend purchase/cancel flows + observability | ⬜ Not started |
+| **4** | Frontend purchase/cancel flows + search | ✅ Complete |
 
 Phase detail, including acceptance criteria, is in [Delivery Phases](#delivery-phases).
 
@@ -326,7 +326,49 @@ explicitly (`go build ./pkg/... ./api-gateway/...`) rather than a bare `./...`; 
 and `make test` targets wrap this. Docker builds are unaffected: each image copies only `pkg` and its
 own service, resolving through the `replace` directive rather than the workspace.
 
-### 7. Topics
+### 7. Postgres full-text search, not Elasticsearch
+
+Searching events by artist, name or city runs in Postgres: a generated `tsvector`
+column, a GIN index, and `websearch_to_tsquery` with `ts_rank_cd` for ranking.
+
+```sql
+search_vector tsvector GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce(name, '')),        'A') ||
+    setweight(to_tsvector('english', coalesce(description, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(location, '')),    'C')
+) STORED
+```
+
+Weights are what make ranking useful rather than merely functional: an event whose
+*name* is "Basalt Drift" outranks two events that only mention them in a description.
+`websearch_to_tsquery` accepts what people actually type — quoted phrases, `OR`, a
+leading minus to exclude — and never errors on malformed input, so a stray operator
+returns no results rather than a `500`.
+
+**Elasticsearch was considered and rejected**, for reasons that are about this system
+rather than about Elasticsearch:
+
+- **The sync problem is the real cost.** Keeping an external index current with
+  Postgres is a dual write — the exact hazard the outbox in Phase 3 exists to solve.
+  It would need its own consumer, its own failure modes, and its own reconciliation.
+- **Postgres FTS is sufficient here, not a compromise.** Stemming, weighted ranking,
+  phrase queries and negation all work, and a GIN index answers them in single-digit
+  milliseconds at this scale.
+- **A generated column cannot drift.** Postgres maintains it on every insert and
+  update; there is no application code to forget and no backfill to run.
+
+**Where the trade flips.** Reach for a dedicated engine when the requirement outgrows
+what a relational index can express: fuzzy matching and typo tolerance, per-user
+relevance tuning, faceted aggregation across many dimensions, or a corpus large
+enough that GIN maintenance costs more than a separate cluster. None of those are
+true yet.
+
+**The upgrade path is already open.** The outbox makes an external index one consumer
+away: a second consumer group reading an `event.created` topic could maintain it
+without touching the write path. That is the payoff for having built the outbox
+properly — adding a downstream reader is now a deployment, not a redesign.
+
+### 8. Topics
 
 | Topic | Key | Produced when | Consumed by |
 |---|---|---|---|
@@ -490,7 +532,7 @@ All routes are called through the gateway at `http://localhost:8000`.
 |---|---|---|---|
 | `POST` | `/users/register` | `{email, password, full_name}` | `{message}` |
 | `POST` | `/users/login` | `{email, password}` | `{token}` |
-| `GET` | `/events` | — | `[Event]` — gains `?limit=&cursor=` in Phase 4 |
+| `GET` | `/events` | — | `[Event]`. `?q=` runs a ranked full-text search; gains `?limit=&cursor=` later |
 
 ### Authenticated (`Authorization: Bearer <jwt>`)
 
@@ -725,23 +767,43 @@ Topics are created explicitly at startup rather than relying on the broker's aut
 only fires on the first produce. A consumer group that joins before that is assigned no partitions
 and does not recover on its own — which is exactly how the worker first came up idle.
 
-### Phase 4 — Frontend + observability ⬜
+### Phase 4 — Frontend and search ✅
 
-- [ ] Event detail page with Stripe Elements checkout
-- [ ] "My tickets" page with QR receipts and cancel flow
-- [ ] `GET /events/{id}` — event detail, required by the detail page
-- [ ] `GET /events/user` — events the caller holds tickets for
-- [ ] Cursor pagination on `GET /events`, `GET /events/user` and `GET /tickets/mine`
-      (`?limit=&cursor=`, opaque cursor, `next_cursor` in the response). Offset pagination is
-      rejected: it drifts when rows are inserted between pages, and `OFFSET n` makes Postgres walk
-      and discard n rows, so deep pages get progressively slower
-- [ ] `GET /tickets/available` returns a **count plus a page**, not every row. The browse UI needs
-      "42 left", not 42 ticket objects, and the current unbounded response grows with inventory
+The backend could sell, charge, refund and confirm a ticket, and none of it was
+reachable from the interface. This phase closes that gap.
+
+- [x] Design tokens for colour, elevation, radius and motion, with a type scale whose tracking
+      varies by size; both themes from one token set
+- [x] Form primitives with labelled fields, linked errors, focus rings and a pending state
+- [x] Landing page replacing the create-next-app template
+- [x] `GET /events/{id}` and an event detail page, server-rendered with client-fetched availability
+- [x] Checkout with Stripe Elements, carrying an idempotency key across retries
+- [x] My tickets with QR receipts, and cancellation through a native confirmation dialog
+- [x] Full-text search over events, ranked, with the query held in the URL
 - [ ] `X-Request-Id` generated at the gateway, propagated downstream, logged everywhere
 - [ ] Structured JSON logging
-- [ ] Architecture diagram and k6 results in this README
+- [ ] Cursor pagination on the list endpoints
 
----
+**Verified end to end in a browser against live Stripe test mode:** browse, sign in, event detail,
+checkout with `4242 4242 4242 4242`, ticket issued with a QR, then cancelled and refunded. Each step
+confirmed in the database — 49 seats left after purchase and 50 after cancellation, a
+`pi_…` intent marked succeeded then refunded with a `re_…` id, an audit row, both outbox rows
+published, and both notifications written by the consumer.
+
+#### A bug only a browser could find
+
+The gateway's `Access-Control-Allow-Headers` listed `Content-Type, Authorization` but not
+`Idempotency-Key`. A browser preflight therefore rejected every purchase and cancellation from the
+frontend, silently, because the request never left the browser. `curl` does not preflight, which is
+why it survived every API-level test and both load scenarios — **the idempotency key, the whole point
+of Phase 2, was unusable from a browser.**
+
+#### Deliberately still open
+
+- **The JWT lives in `localStorage`**, so pages needing it cannot be Server Components. Moving to an
+  httpOnly cookie would let My tickets render on the server.
+- **No request tracing or structured logging.** Logs are readable but not correlated across services.
+- **No pagination.** Every list endpoint returns its full result set.
 
 ## Running it
 

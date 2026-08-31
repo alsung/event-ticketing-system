@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { Suspense } from 'react';
+import { SearchBox } from './SearchBox';
 
 /** A Server Component: browsing events needs no token and no interactivity, so
  *  the fetch happens on the server. That removes the loading effect entirely --
@@ -25,17 +27,25 @@ function formatRange(start: string, end: string) {
     };
 }
 
-async function getEvents(): Promise<EventItem[]> {
+async function getEvents(query: string): Promise<EventItem[]> {
     // Inventory changes on every purchase, so a cached list would show seats
     // that are already gone.
-    const res = await fetch(`${GATEWAY}/events`, { cache: 'no-store' });
+    const url = query
+        ? `${GATEWAY}/events?q=${encodeURIComponent(query)}`
+        : `${GATEWAY}/events`;
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`events request failed: ${res.status}`);
     const data = await res.json();
     return Array.isArray(data) ? data : [];
 }
 
-export default async function EventsPage() {
-    const events = await getEvents();
+export default async function EventsPage({
+    searchParams,
+}: {
+    searchParams: Promise<{ q?: string }>;
+}) {
+    const { q = '' } = await searchParams;
+    const events = await getEvents(q);
 
     return (
         <div className="flex flex-col gap-6">
@@ -46,13 +56,23 @@ export default async function EventsPage() {
                 </p>
             </div>
 
+            <Suspense fallback={<div className="h-11 rounded-md bg-surface-sunken" />}>
+                <SearchBox resultCount={events.length} />
+            </Suspense>
+
             {events.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border-strong bg-surface-sunken px-6 py-12 text-center">
-                    <h2 className="mb-1.5">No events yet</h2>
+                    <h2 className="mb-1.5">{q ? 'No matches' : 'No events yet'}</h2>
                     <p className="mx-auto max-w-sm text-[15px] text-text-secondary">
-                        There is nothing scheduled right now. Check back soon, or seed the
-                        development database with{' '}
-                        <code className="rounded bg-surface px-1.5 py-0.5 text-[13px]">make seed</code>.
+                        {q ? (
+                            <>Nothing matched “{q}”. Try a different artist, event or city.</>
+                        ) : (
+                            <>
+                                There is nothing scheduled right now. Check back soon, or seed the
+                                development database with{' '}
+                                <code className="rounded bg-surface px-1.5 py-0.5 text-[13px]">make seed</code>.
+                            </>
+                        )}
                     </p>
                 </div>
             ) : (

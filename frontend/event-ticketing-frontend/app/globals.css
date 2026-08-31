@@ -1,26 +1,230 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* ---------------------------------------------------------------------------
+   Design tokens.
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+   Every value here is a decision, not a default. Components reference semantic
+   names (surface, muted, accent) rather than raw scales, so a theme change or a
+   rebrand touches this file only.
+
+   Theming works in three states, because the viewer has three: an explicit
+   choice sets data-theme, and the default "system" setting sets nothing at all,
+   where only prefers-color-scheme separates light from dark.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* Neutrals carry a slight cool bias toward the accent. A pure neutral grey
+     reads as unconsidered next to a coloured accent. */
+  --bg:              #FBFCFD;
+  --surface:         #FFFFFF;
+  --surface-sunken:  #F1F4F8;
+  --surface-hover:   #F7F9FB;
+
+  --text:            #0F172A;
+  --text-secondary:  #475569;
+  --text-muted:      #64748B;   /* 4.6:1 on --bg, unlike the gray-500 it replaces */
+
+  --border:          #E2E8F0;
+  --border-strong:   #CBD5E1;
+
+  /* One accent. Semantic colours below are reserved for state, so the brand
+     hue deliberately avoids green and red. */
+  --accent:          #4F46E5;
+  --accent-hover:    #4338CA;
+  --accent-subtle:   #EEF0FE;
+  --on-accent:       #FFFFFF;
+
+  --success:         #047857;
+  --success-subtle:  #ECFDF5;
+  --danger:          #B91C1C;
+  --danger-hover:    #991B1B;
+  --danger-subtle:   #FEF2F2;
+  --warning:         #B45309;
+  --warning-subtle:  #FFFBEB;
+
+  --focus-ring:      #4F46E5;
+
+  /* Elevation as a scale, not ad-hoc shadow classes. Larger surfaces read as
+     thicker: more blur and more spread, not just darker. */
+  --elevation-1: 0 1px 2px rgba(15, 23, 42, .05);
+  --elevation-2: 0 1px 3px rgba(15, 23, 42, .07), 0 4px 12px rgba(15, 23, 42, .05);
+  --elevation-3: 0 2px 6px rgba(15, 23, 42, .08), 0 12px 32px rgba(15, 23, 42, .08);
+
+  --radius-sm: 6px;
+  --radius:    10px;
+  --radius-lg: 14px;
+
+  /* Motion. Two durations and one easing, used everywhere, so the interface
+     shares a rhythm instead of each component inventing its own. */
+  --ease-out:    cubic-bezier(.22, 1, .36, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+  --dur-fast:    120ms;
+  --dur-base:    220ms;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]) {
+    --bg:              #0B0F17;
+    --surface:         #131924;
+    --surface-sunken:  #0F141D;
+    --surface-hover:   #1A2130;
+
+    --text:            #F1F5F9;
+    --text-secondary:  #C2CBD8;
+    --text-muted:      #94A3B8;
+
+    --border:          #263041;
+    --border-strong:   #364256;
+
+    /* Lightened rather than inverted: the light-mode indigo fails contrast on a
+       dark ground. */
+    --accent:          #8B8CF8;
+    --accent-hover:    #A5A6FA;
+    --accent-subtle:   #1C1F3D;
+    --on-accent:       #0B0F17;
+
+    --success:         #34D399;
+    --success-subtle:  #10231C;
+    --danger:          #F87171;
+    --danger-hover:    #FCA5A5;
+    --danger-subtle:   #2A1517;
+    --warning:         #FBBF24;
+    --warning-subtle:  #251C0C;
+
+    --focus-ring:      #8B8CF8;
+
+    /* Shadows barely read on dark grounds; elevation comes from surface
+       lightness instead, with shadow only for genuinely floating layers. */
+    --elevation-1: 0 1px 2px rgba(0, 0, 0, .3);
+    --elevation-2: 0 2px 8px rgba(0, 0, 0, .4);
+    --elevation-3: 0 8px 28px rgba(0, 0, 0, .5);
   }
 }
 
+:root[data-theme="dark"] {
+  --bg:              #0B0F17;
+  --surface:         #131924;
+  --surface-sunken:  #0F141D;
+  --surface-hover:   #1A2130;
+  --text:            #F1F5F9;
+  --text-secondary:  #C2CBD8;
+  --text-muted:      #94A3B8;
+  --border:          #263041;
+  --border-strong:   #364256;
+  --accent:          #8B8CF8;
+  --accent-hover:    #A5A6FA;
+  --accent-subtle:   #1C1F3D;
+  --on-accent:       #0B0F17;
+  --success:         #34D399;
+  --success-subtle:  #10231C;
+  --danger:          #F87171;
+  --danger-hover:    #FCA5A5;
+  --danger-subtle:   #2A1517;
+  --warning:         #FBBF24;
+  --warning-subtle:  #251C0C;
+  --focus-ring:      #8B8CF8;
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, .3);
+  --elevation-2: 0 2px 8px rgba(0, 0, 0, .4);
+  --elevation-3: 0 8px 28px rgba(0, 0, 0, .5);
+}
+
+/* Expose the tokens to Tailwind. `inline` keeps them as var() references rather
+   than resolving at build time, which is what lets a theme swap at runtime. */
+@theme inline {
+  --color-bg:             var(--bg);
+  --color-surface:        var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-hover:  var(--surface-hover);
+  --color-text:           var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted:     var(--text-muted);
+  --color-border:         var(--border);
+  --color-border-strong:  var(--border-strong);
+  --color-accent:         var(--accent);
+  --color-accent-hover:   var(--accent-hover);
+  --color-accent-subtle:  var(--accent-subtle);
+  --color-on-accent:      var(--on-accent);
+  --color-success:        var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-danger:         var(--danger);
+  --color-danger-hover:   var(--danger-hover);
+  --color-danger-subtle:  var(--danger-subtle);
+  --color-warning:        var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius-lg);
+
+  --shadow-e1: var(--elevation-1);
+  --shadow-e2: var(--elevation-2);
+  --shadow-e3: var(--elevation-3);
+
+  /* Inter, wired through the variable next/font sets. The previous stylesheet
+     downloaded Inter and then overrode body with Arial. */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+--------------------------------------------------------------------------- */
+
+* { box-sizing: border-box; }
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tracking is size-specific: type set at display sizes reads too loose at the
+   default, and small text reads too tight. One letter-spacing for everything is
+   wrong somewhere. */
+h1, .t-display { font-size: clamp(1.75rem, 4vw, 2.25rem); line-height: 1.15; letter-spacing: -.022em; font-weight: 700; }
+h2, .t-title   { font-size: 1.25rem;  line-height: 1.3;  letter-spacing: -.012em; font-weight: 600; }
+h3, .t-heading { font-size: 1rem;     line-height: 1.4;  letter-spacing: -.006em; font-weight: 600; }
+.t-body        { font-size: .9375rem; line-height: 1.6;  letter-spacing: 0; }
+.t-small       { font-size: .8125rem; line-height: 1.5;  letter-spacing: .004em; }
+.t-label       { font-size: .75rem;   line-height: 1.4;  letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
+
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+
+/* A visible focus ring on every interactive element. Removing focus outlines is
+   the single most common accessibility regression in a styled app. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Digits that line up in columns need tabular figures, or the layout shifts as
+   values change. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* Keyboard users get past the navigation without tabbing through every link. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border-radius: 0 0 var(--radius) 0;
+}
+.skip-link:focus { left: 0; }
+
+/* Reduced motion means a gentler equivalent, not the absence of feedback:
+   opacity and colour changes still aid comprehension. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

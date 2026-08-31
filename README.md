@@ -120,6 +120,52 @@ each transaction immediately claims a *different* unlocked row.
 `SERIALIZABLE` would be actively wrong here. Under 100 concurrent buyers it produces a storm of
 serialization failures and retries for an invariant that a row lock already enforces perfectly.
 
+The full purchase path, including the parts that deliberately sit outside the transaction:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant S as Stripe
+    participant T as ticket-service
+    participant P as PostgreSQL
+    participant K as Kafka
+
+    B->>S: card details (never reach our server)
+    S-->>B: payment_method_id
+    B->>T: POST /tickets/purchase + Idempotency-Key
+
+    Note over T: replay stored response, 409 in-flight,<br/>or 422 on a reused key with a different body
+
+    rect rgba(79,70,229,0.08)
+        Note over T,P: one transaction, READ COMMITTED
+        T->>P: SELECT ... FOR UPDATE SKIP LOCKED
+        T->>P: UPDATE ticket to purchased (guarded, 1 row)
+        T->>P: INSERT payment (pending)
+        T->>P: INSERT outbox (ticket.purchased)
+    end
+
+    T->>S: charge, keyed with the same idempotency key
+    alt charge fails
+        T->>P: compensating tx, release the seat
+        T-->>B: 402 declined / 502 provider down
+    else charge succeeds
+        T->>P: UPDATE payment to succeeded
+        T-->>B: 200 ticket_id + qr_code
+    end
+
+    loop every second
+        T->>P: claim unpublished outbox rows
+        T->>K: produce, keyed by ticket_id
+        T->>P: mark published
+    end
+    K-->>P: worker inserts a notification row
+```
+
+The charge sits outside the transaction on purpose: holding one open across a network call pins a
+database connection for the length of Stripe's latency, and a rollback cannot un-charge a card. What
+replaces the rollback is an explicit compensating transaction.
+
 **Cancel / refund — `SERIALIZABLE` with a retry loop**
 
 Cancellation is low-volume but spans three tables: it must verify the ticket is `purchased` and owned
@@ -294,8 +340,91 @@ therefore consumed in order — a cancellation can never be processed before its
 
 ## Data model
 
-Existing tables — `users`, `events`, `tickets`, `ticket_cancellation_logs` — plus three added by
-Phases 2 and 3.
+Seven tables and nine foreign keys. `outbox` and `notifications` deliberately have none: an outbox
+row is an immutable log entry that must outlive its subject, and notifications are written by a
+separate consumer that should not be coupled to this schema.
+
+```mermaid
+erDiagram
+    users ||--o{ events : organizes
+    users ||--o{ tickets : owns
+    users ||--o{ payments : pays
+    users ||--o{ idempotency_keys : scopes
+    users ||--o{ ticket_cancellation_logs : cancels
+    events ||--o{ tickets : "has inventory"
+    events ||--o{ ticket_cancellation_logs : records
+    tickets ||--o{ payments : "charged for"
+    tickets ||--o{ ticket_cancellation_logs : audited
+
+    users {
+        uuid id PK
+        text email UK
+        text password_hash
+        bool is_admin
+    }
+    events {
+        uuid id PK
+        text name
+        text location
+        timestamp start_time
+        uuid organizer_id FK
+    }
+    tickets {
+        uuid id PK
+        uuid event_id FK
+        uuid user_id FK "null while available"
+        text status "available | purchased"
+        text qr_code UK
+        numeric price
+    }
+    payments {
+        uuid id PK
+        uuid ticket_id FK
+        bigint amount_cents "integer cents, never a float"
+        text status "pending|succeeded|failed|refunded"
+        text stripe_payment_intent_id UK
+        text stripe_refund_id UK "at-most-once refund guard"
+    }
+    idempotency_keys {
+        text key PK
+        uuid user_id FK
+        text request_hash "detects a reused key"
+        int response_status "null while in flight"
+        jsonb response_body
+    }
+    ticket_cancellation_logs {
+        uuid id PK
+        uuid ticket_id FK
+        timestamp cancelled_at
+        text reason
+    }
+    outbox {
+        bigint id PK
+        uuid aggregate_id "kafka message key"
+        text topic
+        jsonb payload
+        timestamp published_at "null = pending"
+    }
+    notifications {
+        uuid id PK
+        uuid message_id UK "dedupe on the message"
+        uuid ticket_id
+        text event_type
+    }
+```
+
+### Constraints that enforce the invariants
+
+| Constraint | Table | What it prevents |
+|---|---|---|
+| `stripe_refund_id` UNIQUE | payments | A second refund against one payment, enforced by the database even if the code were wrong |
+| `stripe_payment_intent_id` UNIQUE | payments | Two local rows for one Stripe intent after a retry |
+| `message_id` UNIQUE | notifications | A duplicate confirmation from at-least-once delivery |
+| `qr_code` UNIQUE | tickets | The same QR issued twice |
+| `email` UNIQUE | users | Duplicate accounts — surfaces as `409`, not `500` |
+| `key` PRIMARY KEY | idempotency_keys | Two concurrent requests both believing they hold the key |
+
+Detail on the tables added by Phases 2 and 3 follows.
 
 ### `tickets` (existing)
 

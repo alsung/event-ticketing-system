@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/alsung/event-ticketing-system/services/event-service/internal/models"
 	"github.com/alsung/event-ticketing-system/services/pkg/database"
@@ -98,7 +99,11 @@ func CreateEvent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetEvents retrieves a list of all events
+// GetEvents lists events, optionally filtered by a full-text query.
+//
+// Search runs in Postgres rather than a dedicated engine. At this scale an
+// external index would add a synchronisation problem without solving one that
+// exists; the README records the threshold where that trade flips.
 func GetEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -113,22 +118,52 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := db.Query(ctx,
-		"SELECT id, name, description, location, start_time, end_time, organizer_id, created_at FROM events")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	var rows pgx.Rows
+	if query == "" {
+		rows, err = db.Query(ctx, `
+			SELECT id, name, description, location, start_time, end_time, organizer_id, created_at
+			  FROM events
+			 ORDER BY start_time
+		`)
+	} else {
+		// websearch_to_tsquery, not plainto_tsquery: it accepts what people
+		// actually type -- quoted phrases, OR, and a leading minus to exclude --
+		// and it never errors on malformed input, so a stray operator returns no
+		// results rather than a 500.
+		//
+		// ts_rank_cd weighs term proximity as well as frequency, so an event
+		// whose name contains both words outranks one that mentions them apart.
+		rows, err = db.Query(ctx, `
+			SELECT id, name, description, location, start_time, end_time, organizer_id, created_at
+			  FROM events
+			 WHERE search_vector @@ websearch_to_tsquery('english', $1)
+			 ORDER BY ts_rank_cd(search_vector, websearch_to_tsquery('english', $1)) DESC,
+			          start_time
+		`, query)
+	}
+
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("list events (q=%q): %v", query, err)
+		http.Error(w, "Could not load events", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	var events []models.Event
+	events := []models.Event{}
 	for rows.Next() {
 		var event models.Event
-		if err := rows.Scan(&event.ID, &event.Name, &event.Description, &event.Location, &event.StartTime, &event.EndTime, &event.OrganizerID, &event.CreatedAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.Name, &event.Description, &event.Location,
+			&event.StartTime, &event.EndTime, &event.OrganizerID, &event.CreatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

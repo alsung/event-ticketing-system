@@ -538,6 +538,36 @@ erDiagram
     }
 ```
 
+### Roles and ownership
+
+`users.role` is one of `attendee`, `organizer` or `admin`. It replaced an `is_admin`
+boolean, which could only express "staff or not" — organisers are a third thing: they
+manage their own events and hold no authority over anyone else's.
+
+**The role says who you are; `events.organizer_id` decides what you may touch.**
+
+| Actor | Create an event | Edit an event | Mint tickets |
+|---|---|---|---|
+| attendee | `403` | `404` | `403` |
+| organizer | ✅ owned by them | own events only | own events only |
+| admin | ✅ | any | any |
+
+Two details worth the words:
+
+- **The organiser comes from the verified token, never the request body.** Reading it
+  from the body let a caller attribute an event to somebody else — the same mistake the
+  purchase path has always avoided by taking the buyer from the JWT.
+- **A failed edit returns `404`, not `403`.** Distinguishing "does not exist" from "not
+  yours" tells a stranger which event ids are real.
+
+Ownership lives in the `WHERE` clause rather than a separate read-then-write:
+
+```sql
+UPDATE events SET … WHERE id = $6 AND ($8 = 'admin' OR organizer_id = $7)
+```
+
+Checking first and updating second leaves a window between the two.
+
 ### Constraints that enforce the invariants
 
 | Constraint | Table | What it prevents |
@@ -623,8 +653,10 @@ All routes are called through the gateway at `http://localhost:8000`.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| `POST` | `/events/create` | `{name, description, location, start_time, end_time}` | `{message}` |
-| `POST` | `/tickets/create` | `{event_id, price, quantity}` | `{message, quantity}` |
+| `POST` | `/events/create` | `{name, description, location, start_time, end_time}` | `{id, message}` — organiser taken from the token, never the body |
+| `PUT` | `/events/{id}` | same shape | `{message}`. `404` when absent **or not yours** |
+| `GET` | `/organizer/events` | — | `[Event + total_tickets, sold_tickets, available_tickets, revenue]` |
+| `POST` | `/tickets/create` | `{event_id, price, quantity}` | `{message, quantity}` — admin, or the organiser who owns the event |
 | `GET` | `/tickets/available?event_id=` | — | `[{id, price, created_at}]`. Unbounded; see Known simplifications |
 | `POST` | `/tickets/purchase` | `{event_id, payment_method_id}` | `{ticket_id, qr_code, payment_intent_id}` |
 | `POST` | `/tickets/cancel` | `{ticket_id, reason?}` | `{message, refund_id}` |
@@ -865,6 +897,7 @@ reachable from the interface. This phase closes that gap.
 - [x] Checkout with Stripe Elements, carrying an idempotency key across retries
 - [x] My tickets with QR receipts, and cancellation through a native confirmation dialog
 - [x] Full-text search over events, ranked, with the query held in the URL
+- [x] Organiser dashboard, event creation and management, with roles and ownership checks
 - [ ] `X-Request-Id` generated at the gateway, propagated downstream, logged everywhere
 - [ ] Structured JSON logging
 - [ ] Cursor pagination on the list endpoints
@@ -985,6 +1018,11 @@ Deliberate scope cuts, listed so they can be discussed rather than discovered:
   available row" to "this specific row," which removes `SKIP LOCKED` as an option.
 - **No pagination until Phase 4.** Every list endpoint returns its full result set. Fine at seed
   scale, wrong at any real size.
+- **The workspace can hide an incomplete `go.sum`.** `go.work` lets a module resolve a
+  dependency through a sibling, so a module can build locally while failing in Docker,
+  which copies only that module and `pkg`. CI guards this by building every module with
+  `GOWORK=off`; it is a real cost of the workspace, accepted for the editor support and
+  single-command testing it buys.
 - **No hold/reservation window.** Real ticketing holds inventory for a few minutes during checkout.
   This claims at purchase time, so a Stripe failure rolls back rather than releasing a timed hold.
 - **Single-region, no replicas.** Read replicas would require handling replication lag on

@@ -24,6 +24,10 @@ func NewRouter() Router {
 			"/events/":  os.Getenv("EVENT_SERVICE_URL"),
 			"/tickets":  os.Getenv("TICKET_SERVICE_URL"),
 			"/tickets/": os.Getenv("TICKET_SERVICE_URL"),
+			// Organiser routes are served by event-service; they live under
+			// their own prefix so the gateway has one thing to protect.
+			"/organizer":  os.Getenv("EVENT_SERVICE_URL"),
+			"/organizer/": os.Getenv("EVENT_SERVICE_URL"),
 		},
 	}
 }

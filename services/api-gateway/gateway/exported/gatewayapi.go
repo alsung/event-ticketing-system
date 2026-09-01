@@ -15,11 +15,18 @@ type GatewayHandler struct {
 // protectedPrefixes lists the routes that require a valid JWT. Everything else
 // is public: POST /users/register, POST /users/login and GET /events.
 //
-// This is the single place auth is enforced. It used to be applied here *and*
-// globally in cmd/main.go, where the global pass exempted only /users/*, so
-// GET /events demanded a token despite being a public browse endpoint.
+// This is the single place auth is enforced at the edge. It used to be applied
+// here *and* globally in cmd/main.go, where the global pass exempted only
+// /users/*, so GET /events demanded a token despite being a public browse
+// endpoint.
+//
+// Prefixes cannot distinguish methods, so PUT /events/{id} passes through here
+// unauthenticated -- GET on the same path is public. The service authenticates
+// it regardless, which is why services verify tokens themselves rather than
+// trusting the edge.
 var protectedPrefixes = []string{
 	"/events/create",
+	"/organizer/",
 	"/tickets/",
 }
 

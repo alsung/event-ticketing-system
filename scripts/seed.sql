@@ -18,12 +18,17 @@ DELETE FROM events;
 
 -- bcrypt digest of 'password123'. Generated once and pinned here rather than
 -- computed at seed time, because bcrypt cannot be produced in SQL.
-INSERT INTO users (email, password_hash, full_name, is_admin)
+-- Two accounts, both with the digest of 'password123'. The organiser exists so
+-- the organiser flow can be demonstrated without handing out admin rights.
+INSERT INTO users (email, password_hash, full_name, role)
 VALUES ('admin@example.com',
         '$2a$10$VthJ97JNlG4sLwfYb5i.7OVyXZrY1pigGVfXY4ZMuM85Sc61nV6pe',
-        'Admin User', true)
+        'Admin User', 'admin'),
+       ('organizer@example.com',
+        '$2a$10$VthJ97JNlG4sLwfYb5i.7OVyXZrY1pigGVfXY4ZMuM85Sc61nV6pe',
+        'Ines Oyelaran', 'organizer')
 ON CONFLICT (email) DO UPDATE
-    SET is_admin      = true,
+    SET role          = EXCLUDED.role,
         full_name     = EXCLUDED.full_name,
         password_hash = EXCLUDED.password_hash;
 
@@ -32,13 +37,16 @@ ON CONFLICT (email) DO UPDATE
 -- nothing about ranking.
 WITH organizer AS (
     SELECT id FROM users WHERE email = 'admin@example.com'
+), organiser2 AS (
+    SELECT id FROM users WHERE email = 'organizer@example.com'
 ), seeded AS (
     INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
+    -- Alternate ownership so both seeded accounts have events to manage.
     SELECT v.name, v.description, v.location,
            NOW() + (v.days || ' days')::interval,
            NOW() + (v.days || ' days')::interval + interval '3 hours',
-           organizer.id
-    FROM organizer, (VALUES
+           CASE WHEN v.days % 2 = 0 THEN organiser2.id ELSE organizer.id END
+    FROM organizer, organiser2, (VALUES
         ('Aurora Vale · Midnight Cartography',
          'Aurora Vale brings the Midnight Cartography tour to the Fillmore, with support from Low Ceiling.',
          'San Francisco, CA', 7),
@@ -97,4 +105,4 @@ FROM first_event, generate_series(1, 38);
 
 COMMIT;
 
-\echo 'Seeded: admin@example.com / password123, 12 events, 50 tickets on the first'
+\echo 'Seeded: admin@example.com and organizer@example.com / password123, 12 events'

@@ -61,20 +61,42 @@ func GetEvent(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(event)
 }
 
-// CreateEvent handles creating new events
+// CreateEvent creates an event owned by the caller.
+//
+// Two things changed from the original here. The organiser is taken from the
+// verified token rather than the request body -- reading it from the body let a
+// caller attribute an event to somebody else, the same mistake the purchase path
+// deliberately avoids. And it now requires an organiser or admin role: before,
+// any registered account could write to the public catalogue.
 func CreateEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var event models.Event
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	ctx := r.Context()
+
+	userID, err := callerID(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	ctx := r.Context()
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Location    string `json:"location"`
+		StartTime   string `json:"start_time"`
+		EndTime     string `json:"end_time"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "An event needs a name", http.StatusBadRequest)
+		return
+	}
 
 	db, err := database.Pool(ctx)
 	if err != nil {
@@ -82,20 +104,34 @@ func CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.Exec(ctx,
-		`INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		event.Name, event.Description, event.Location, event.StartTime, event.EndTime, event.OrganizerID)
+	role, err := userRole(r, userID)
+	if err != nil {
+		http.Error(w, "Could not check permissions", http.StatusInternalServerError)
+		return
+	}
+	if role != roleOrganizer && role != roleAdmin {
+		http.Error(w, "You do not have an organiser account", http.StatusForbidden)
+		return
+	}
+
+	var id uuid.UUID
+	err = db.QueryRow(ctx, `
+		INSERT INTO events (name, description, location, start_time, end_time, organizer_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id
+	`, req.Name, req.Description, req.Location, req.StartTime, req.EndTime, userID).Scan(&id)
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("create event for %s: %v", userID, err)
+		http.Error(w, "Could not create the event", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "Event created successfully",
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id":      id,
+		"message": "Event created",
 	})
 }
 

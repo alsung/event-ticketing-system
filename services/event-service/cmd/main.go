@@ -41,9 +41,19 @@ func main() {
 	mux.HandleFunc("/health/ready", httpx.Ready(map[string]httpx.Check{
 		"postgres": database.Ping,
 	}))
-	mux.HandleFunc("/events", handlers.GetEvents)          // GET events
-	mux.HandleFunc("/events/create", handlers.CreateEvent) // POST create events
-	mux.HandleFunc("/events/{id}", handlers.GetEvent)      // GET one event
+	// Every pattern names its method. Without one, "/events/create" also matches
+	// GET /events/create, which "GET /events/{id}" matches too -- neither is a
+	// strict subset of the other, so ServeMux treats it as a conflict and panics
+	// at registration rather than guessing.
+	mux.HandleFunc("GET /events", handlers.GetEvents)
+	mux.HandleFunc("POST /events/create", handlers.CreateEvent)
+	mux.HandleFunc("GET /events/{id}", handlers.GetEvent)
+	mux.HandleFunc("PUT /events/{id}", handlers.UpdateEvent)
+
+	// Organiser routes sit under their own prefix rather than as /events/mine,
+	// which removes the same ambiguity by construction and gives the gateway a
+	// single prefix to protect.
+	mux.HandleFunc("GET /organizer/events", handlers.MyEvents)
 
 	handlerWithMiddleware := httpx.Logging(mux)
 

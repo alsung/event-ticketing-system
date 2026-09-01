@@ -331,11 +331,8 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Extract user ID from JWT
 	userID, err := callerID(r)
-	log.Println("userID", userID)
 	if err != nil {
-		log.Println("err", err)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -346,26 +343,16 @@ func CreateTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isAdmin, err := store.IsAdmin(ctx, db, userID)
+	// One query answers both questions: is this an admin, or an organiser who
+	// owns this event. Asking them separately meant reading the event even when
+	// the caller had no standing to see it.
+	allowed, err := store.MayMintTickets(ctx, db, userID, req.EventID)
 	if err != nil {
-		http.Error(w, "Error checking admin status", http.StatusInternalServerError)
+		http.Error(w, "Could not check permissions", http.StatusInternalServerError)
 		return
 	}
-
-	// Validate that the user is the organizer of the event or admin
-	var organizerID uuid.UUID
-	err = db.QueryRow(ctx, `
-		SELECT organizer_id FROM events WHERE id = $1
-	`, req.EventID).Scan(&organizerID)
-
-	if err != nil {
-		http.Error(w, "Event not found", http.StatusNotFound)
-		return
-	}
-
-	// Allow admin OR organizer to create tickets
-	if userID != organizerID && !isAdmin {
-		http.Error(w, "Forbidden: You are not the organizer or admin", http.StatusForbidden)
+	if !allowed {
+		http.Error(w, "You do not have permission to add tickets to this event", http.StatusForbidden)
 		return
 	}
 

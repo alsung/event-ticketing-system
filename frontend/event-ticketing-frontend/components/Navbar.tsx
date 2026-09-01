@@ -53,6 +53,11 @@ export default function Navbar() {
                         <>
                             <Link href="/events" className={linkClass('/events')}>Events</Link>
                             <Link href="/tickets" className={linkClass('/tickets')}>My tickets</Link>
+                            {/* Shown to everyone signed in. The page itself
+                                explains the role requirement rather than the nav
+                                hiding a destination and leaving no way to learn
+                                it exists. */}
+                            <Link href="/organizer" className={linkClass('/organizer')}>Organise</Link>
                             <button
                                 onClick={signOut}
                                 className="ml-2 rounded-md px-3 py-2 text-sm font-medium text-text-secondary transition-colors duration-[120ms] hover:bg-danger-subtle hover:text-danger active:scale-[.97]"

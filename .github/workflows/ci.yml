@@ -33,6 +33,19 @@ jobs:
       - name: Test all modules
         run: make go-test
 
+      # The workspace lets a module borrow a dependency from a sibling, so a
+      # module can build locally with a go.sum that is missing entries. Docker
+      # copies one module plus pkg and nothing else, so it fails there instead.
+      # GOWORK=off reproduces exactly what the image build sees.
+      - name: Each module builds without the workspace
+        run: |
+          cd services
+          for m in pkg api-gateway user-service event-service ticket-service; do
+            echo "::group::$m (GOWORK=off)"
+            (cd "$m" && GOWORK=off go build ./... && GOWORK=off go vet ./...) || exit 1
+            echo "::endgroup::"
+          done
+
       - name: Shared dependency versions agree
         run: make deps-check
 

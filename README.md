@@ -22,6 +22,11 @@ consistent. Most of this document is about how that is done and why.
 
 Phase detail, including acceptance criteria, is in [Delivery Phases](#delivery-phases).
 
+All five phases are complete as scoped, and the project is **paused here** to move on to other work.
+That is not the same as finished: [Not built, and why](#not-built-and-why) lists every gap found in a
+closing audit — including three places where the design described below is ahead of the code — with
+the reason each was left. Read that section alongside this one.
+
 ---
 
 ## Architecture
@@ -330,9 +335,33 @@ images build with `CGO_ENABLED=0` onto `distroless/static`. `twmb/franz-go` is t
 option and was the runner-up; `kafka-go` wins on readability for a producer and a single consumer
 group at this scale.
 
-### 5. Layered structure in one service, not all four
+### 5. Seams where they pay for themselves — and one that is still missing
 
-`ticket-service` is split into three layers; the other services are not.
+> **Status: partly built.** The provider interface exists; the service layer does not. This section
+> describes both, because the gap is the honest state of the code. See
+> [Not built, and why](#not-built-and-why).
+
+The reasoning starts from a single test worth being able to write:
+
+> *Stripe's charge succeeds, then the local write that settles it fails. Does the customer keep the
+> ticket, is the payment still recoverable, and does a retry avoid double-charging?*
+
+That test needs three things: a payment provider that can fail on demand, business logic invokable
+without an HTTP server, and a transaction the test itself controls.
+
+**What exists.** The first and third are built. `payments.Provider` is an interface with two
+implementations — `StripeProvider` and `FakeProvider`, the latter able to inject a failure and to
+replay a charge for a repeated idempotency key exactly as the real processor does. The `store`
+package is SQL only, and every write takes a `pgx.Tx` supplied by the caller, which is what lets one
+purchase transaction span `tickets`, `payments`, `idempotency_keys` and `outbox` — four stores, one
+commit.
+
+**What does not.** There is no `service` package. Transactions are opened inside the handlers
+(`internal/handlers/ticket.go`), so `PurchaseTicket` is a single ~210-line function that decodes the
+request, owns the transaction, orchestrates Stripe, and maps errors to status codes. The business
+logic is therefore not reachable without an HTTP server, and **the test above has not been written**.
+
+The structure the argument calls for:
 
 | Layer | Responsibility | Never touches |
 |---|---|---|
@@ -340,28 +369,18 @@ group at this scale.
 | `service` | Owns transactions; orchestrates store, payments, and outbox | HTTP types |
 | `store` | SQL only, against a `pgx.Tx` supplied by the caller | Transaction boundaries |
 
-The governing rule is that **the service layer opens the transaction and the store layer receives
-it**. That is what allows a single purchase transaction to atomically span `tickets`, `payments`,
-`idempotency_keys`, and `outbox` — four stores, one commit.
+with the governing rule that **the service layer opens the transaction and the store layer receives
+it**. A doc comment on `database.InTx` already states that rule, and the `FakeProvider` doc comment
+already names the test — the scaffolding was built for a layer that was never extracted.
 
-This split was not adopted as a general principle. It is the minimum structure required to write one
-specific test:
-
-> *Stripe's charge succeeds, then the local commit fails. Does the ticket return to the pool, and
-> does the retry avoid double-charging?*
-
-That test needs a payment provider that can be made to fail on demand (hence an interface rather than
-a concrete Stripe client), business logic invokable without an HTTP server (hence service separated
-from handlers), and a transaction the test itself controls (hence stores that accept a `pgx.Tx`).
-The three layers are what that requirement decomposes into.
-
-`user-service` and `event-service` deliberately keep flat handlers. They own no multi-table
+`user-service` and `event-service` would keep flat handlers regardless. They own no multi-table
 invariants, call no external providers, and have nothing to fake — layering them would add
-indirection to buy nothing. Applying the structure only where it pays for itself is the point.
+indirection to buy nothing. Applying structure only where it pays for itself is the point, and it is
+also why this is not simply "add layers everywhere."
 
-The cost, stated plainly: for simple reads like `GET /tickets/available`, the service layer is a
-pass-through that adds no value. It is kept anyway, because two competing patterns inside one package
-is more expensive to read than one uniform pattern with a few thin methods.
+The cost of doing it, stated plainly: for simple reads like `GET /tickets/available` the service
+layer would be a pass-through that adds no value. It would be kept anyway, because two competing
+patterns inside one package cost more to read than one uniform pattern with a few thin methods.
 
 ### 6. Module boundaries and dependency direction
 
@@ -1004,9 +1023,64 @@ The gateway additionally needs `USER_SERVICE_URL`, `EVENT_SERVICE_URL`, `TICKET_
 
 ---
 
+## Not built, and why
+
+The project is paused here to move on to other work. What follows is everything identified as
+missing at that point, with the reason it was not done, so that the gap is a known quantity rather
+than a discovery. An audit on 2026-09-01 produced this list.
+
+Three of these matter more than the rest, because **the design documented above is ahead of the code
+in three specific places**. They are listed first.
+
+### The documentation is ahead of the code
+
+| Gap | Where | Why it is not done |
+|---|---|---|
+| **No `service` layer.** Transactions are opened in handlers; `PurchaseTicket` is one ~210-line function. | `ticket-service/internal/handlers/ticket.go:359`, `:495` | The extraction is roughly half a day and touches every ticket route. Design decision 5 now states this outright rather than describing the intended structure as though it were built. |
+| **The test that motivates decision 5 is not written** — *charge succeeds, settlement fails*. | `internal/service/` does not exist | It cannot be written while the logic lives inside an `http.HandlerFunc`; it is blocked on the extraction above. The `FakeProvider` it would use is built and already documents this exact scenario. |
+| **No reconciliation sweep.** Several comments name reconciliation as the recovery path for a crash between charging and settling; no job, sweep or endpoint implements it. | `handlers/ticket.go:127`, `:222`, `:245`, `:591`; `store/payment.go:16`, `:48` | Roughly two hours: query payments left `pending` or `succeeded`-but-refund-failed, match them against Stripe by the `ticket_id` metadata already attached to every charge, and settle or flag. Not started. **The data model makes reconciliation possible — that part is real — but nothing performs it.** |
+
+The practical consequence of the third item: a crash between the Stripe call and the settling write
+leaves a payment row holding a provisional id (`pending_<uuid>`) and no Stripe intent id. It is
+recoverable, because the charge carries `ticket_id` in its metadata, but only by a process that does
+not yet exist.
+
+### Testing
+
+| Gap | Why it is not done |
+|---|---|
+| **CI runs no database.** The three `store` integration tests skip unless `TEST_DATABASE_URL` is set, and the workflow never sets it — so CI is green while the concurrency and payment logic is untested there. `make go-test-db` runs them locally against the compose Postgres. | About fifteen minutes: add a `postgres:15` service container and the env var. Deferred only because it was found in the same audit as the items above. |
+| **No handler or end-to-end Go tests.** Coverage is the `payments` package (7 tests) and the `store` package (3 integration tests). | The `scripts/smoke.sh` suite covers the routes end to end at the HTTP level, which is where the value was for the money; Go-level route tests were never the gap. |
+| **No frontend tests.** | Deliberate. The frontend is a demonstration surface, and its correctness is checked by the browser walkthrough and by `npm run build` in CI. |
+
+### Operations
+
+None of the following is exotic; all were simply out of scope for a project whose thesis is
+correctness under contention rather than production readiness.
+
+| Gap | Why it is not done |
+|---|---|
+| **No graceful shutdown, and no server timeouts.** All four services call `http.ListenAndServe` directly, so there is no `ReadTimeout`, `WriteTimeout` or `IdleTimeout`, and a `SIGTERM` kills in-flight requests. | The most pointed omission on this list, given the thesis: a deploy during a purchase can kill the request between the Stripe charge and the settling write — the exact window reconciliation is meant to cover. About 45 minutes for all four services. |
+| **No rate limiting** on `/tickets/purchase` or `/users/login`. | The load tests want an unthrottled path, and no limiter was needed to answer the questions this project set out to answer. |
+| **No structured logging or request ids.** Standard `log` throughout; a single purchase cannot be traced across the gateway, ticket-service, relay and worker. | `log/slog` plus an id threaded from the gateway is about an hour. Not done. |
+| **No metrics or tracing.** No `/metrics`, no OpenTelemetry. The capacity numbers come from k6 and from `DB_MAX_CONNS` experiments rather than from instrumentation. | Enough to find the bottleneck was a controlled experiment, so instrumentation never became the blocker. |
+
+### Security
+
+| Gap | Why it is not done |
+|---|---|
+| **`Access-Control-Allow-Origin: *`** at the gateway (`cors.go:9`), with `Authorization` and `Idempotency-Key` allowed. | Wildcard is workable here because the JWT travels as a header from `localStorage` rather than as a cookie, so the browser's credential rules do not apply — but an env-driven origin allowlist is the correct posture and is a one-line change. Left as-is for local development convenience. |
+| **JWT in `localStorage`.** | See below; a deliberate simplification rather than an oversight. |
+| No secret scanning, no dependency vulnerability gate in CI. | Dependabot and a `govulncheck` step are the obvious additions. Not configured. |
+
+Verified clean, for the record: no `.env` file is tracked, no live Stripe key appears anywhere in
+the repository (the `sk_` matches are a guard that refuses live keys, plus dummy strings in a test),
+and passwords are bcrypt digests.
+
 ## Known simplifications
 
-Deliberate scope cuts, listed so they can be discussed rather than discovered:
+Deliberate scope cuts — chosen rather than missed, listed so they can be discussed rather than
+discovered:
 
 - **One shared database.** Real microservices own their data. Here all four share a Postgres
   instance, and `ticket-service` reads `events` and `users` directly. The migration path is

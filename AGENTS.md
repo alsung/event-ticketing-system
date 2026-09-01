@@ -40,7 +40,17 @@ migrate -path db/migrations -database "postgres://admin:password@localhost:5433/
 Each service (`api-gateway`, `user-service`, `event-service`, `ticket-service`) and `services/pkg` is its own Go module. When adding dependencies or running `go mod tidy`, do so from the specific service directory. Shared code is referenced via a `replace` directive pointing to `../pkg`.
 
 ### Testing
-No test framework or test script is currently configured. Check individual service `go.mod` files for any test dependencies before adding tests.
+Standard `go test`, run across all modules via the workspace:
+
+```bash
+make go-test      # unit tests only; the store integration tests skip
+make go-test-db   # also runs them, against the compose Postgres on :5433
+```
+
+Coverage is `ticket-service/internal/payments` (unit) and `ticket-service/internal/store`
+(integration — these skip unless `TEST_DATABASE_URL` is set, and **CI does not set it**, so a green
+CI run has not exercised them). `scripts/smoke.sh` covers the routes end to end against a running
+stack. See "Not built, and why" in the README before assuming a behaviour is under test.
 
 ---
 

@@ -144,6 +144,90 @@ flowchart TB
     WORKER -.-> T_notif
 ```
 
+### Source map
+
+The same system as above, but answering a different question: **where does this live in the
+repository.** Solid arrows are synchronous calls; dashed arrows are asynchronous.
+
+Note what this makes visible that the runtime view does not — the organiser flow is a second handler
+inside `event-service` rather than a service of its own, and the outbox relay is a goroutine inside
+`ticket-service` rather than a separate deployable.
+
+```mermaid
+flowchart TB
+    V(["Visitor"])
+
+    subgraph UI["Next.js · frontend/event-ticketing-frontend/app"]
+        direction LR
+        F1["Event browser<br/><i>events/page.tsx</i>"]
+        F2["Event detail<br/><i>events/[id]/page.tsx</i>"]
+        F3["Checkout<br/><i>events/[id]/checkout/CheckoutForm.tsx</i>"]
+        F4["My tickets<br/><i>tickets/page.tsx</i>"]
+        F5["Organiser<br/><i>organizer/page.tsx</i>"]
+    end
+
+    subgraph GW["api-gateway · the only published port"]
+        direction LR
+        G1["Middleware chain<br/><i>gateway/exported/gatewayapi.go</i>"]
+        G2["JWT enforcement<br/><i>exported/middleware/auth.go</i>"]
+        G3["Reverse proxy<br/><i>gateway/internal/client.go</i>"]
+    end
+
+    subgraph US["user-service"]
+        U1["handlers/user.go<br/><i>register · login · issues the JWT</i>"]
+    end
+
+    subgraph ES["event-service"]
+        direction LR
+        E1["handlers/event.go<br/><i>catalog · full-text search</i>"]
+        E2["handlers/organizer.go<br/><i>ownership-scoped management</i>"]
+    end
+
+    subgraph TS["ticket-service"]
+        direction LR
+        T1["handlers/ticket.go<br/><i>purchase · cancel · receipts</i>"]
+        T2["idempotency/middleware.go<br/><i>dedups money routes</i>"]
+        T3["payments/provider.go<br/><i>Stripe or fake</i>"]
+        T4["utils/qrcode.go"]
+        T5["outbox/relay.go<br/><i>goroutine, polls 1s</i>"]
+    end
+
+    PG[("PostgreSQL")]
+    STRIPE{{"Stripe API"}}
+    KAFKA{{"Kafka · KRaft"}}
+    WK["notification-worker<br/><i>ticket-service/cmd/worker/main.go</i>"]
+    NOTIF[("notifications")]
+
+    V --> UI
+    F1 --> G1
+    F2 --> G1
+    F3 --> G1
+    F4 --> G1
+    F5 --> G1
+
+    G1 -->|"protects routes"| G2
+    G1 -->|"dispatches"| G3
+    G3 -->|"/users/*"| U1
+    G3 -->|"/events/*"| E1
+    G3 -->|"/organizer/*"| E2
+    G3 -->|"/tickets/*"| T1
+
+    T1 --> T2
+    T1 --> T3
+    T1 --> T4
+
+    U1 --> PG
+    E1 --> PG
+    E2 --> PG
+    T1 -->|"claims inventory, writes outbox"| PG
+    T3 -.->|"charge · refund"| STRIPE
+
+    PG -.->|"claim unpublished rows"| T5
+    T5 -.->|"produce, keyed by ticket_id"| KAFKA
+    KAFKA -.->|"ticket.purchased · ticket.cancelled"| WK
+    WK -.-> NOTIF
+```
+
 ### Request and response shapes
 
 | Action | Endpoint | Request | Response | Writes |
@@ -164,9 +248,9 @@ write an outbox row inside their transaction, and both are the reason the rest o
 
 | Service | Owns | Notes |
 |---|---|---|
-| **api-gateway** | Edge concerns | Sole entry point for the browser. CORS, JWT verification, request logging, prefix routing (`/users`, `/events`, `/tickets`). Forwards the full path unchanged. |
-| **user-service** | Identity | Registration, login, JWT issuance (`user_id`, `email`, `exp`), `is_admin` flag. |
-| **event-service** | Catalog | Event creation, listing, detail, and ranked full-text search. |
+| **api-gateway** | Edge concerns | Sole entry point for the browser. CORS, JWT verification, request logging, prefix routing (`/users`, `/events`, `/organizer`, `/tickets`). Forwards the full path unchanged. |
+| **user-service** | Identity | Registration (bcrypt), login, JWT issuance (`user_id`, `email`, `exp`). Authority lives in `users.role` — `attendee`, `organizer` or `admin`. |
+| **event-service** | Catalog + organisers | Event creation, listing, detail, ranked full-text search, and ownership-scoped organiser management with per-event sales aggregates. |
 | **ticket-service** | Inventory + money | The critical path: minting inventory, the purchase transaction, cancellation/refund, QR receipts, and the outbox relay. |
 
 Services communicate over HTTP through the gateway; the ticket service talks to Stripe directly and
@@ -412,8 +496,8 @@ algorithm in a single place.
 
 **Only the gateway is published.** Compose previously exposed ports 8081-8083, which made the
 "gateway is the sole entry point" claim false and allowed the auth bypass above. The base compose file
-now publishes only the gateway and Postgres; the services remain reachable on the internal compose
-network but not from the host. `make up-debug` layers `docker-compose.debug.yml` on top to republish
+now publishes only the gateway, Postgres and Kafka -- the last two for local tooling; the four
+services remain reachable on the internal compose network but not from the host. `make up-debug` layers `docker-compose.debug.yml` on top to republish
 them when debugging one directly. That file is deliberately *not* named `docker-compose.override.yml`,
 which Compose loads automatically -- that would re-expose the services by default and undo the
 boundary.
@@ -484,7 +568,7 @@ therefore consumed in order — a cancellation can never be processed before its
 
 ## Data model
 
-Seven tables and nine foreign keys. `outbox` and `notifications` deliberately have none: an outbox
+Eight tables and nine foreign keys. `outbox` and `notifications` deliberately have none: an outbox
 row is an immutable log entry that must outlive its subject, and notifications are written by a
 separate consumer that should not be coupled to this schema.
 
@@ -504,7 +588,7 @@ erDiagram
         uuid id PK
         text email UK
         text password_hash
-        bool is_admin
+        text role
     }
     events {
         uuid id PK
@@ -942,6 +1026,9 @@ of Phase 2, was unusable from a browser.**
 - **No request tracing or structured logging.** Logs are readable but not correlated across services.
 - **No pagination.** Every list endpoint returns its full result set.
 
+These three are repeated in [Not built, and why](#not-built-and-why) alongside everything else
+outstanding; that section is the complete list.
+
 ## Running it
 
 ### Full stack
@@ -1050,7 +1137,7 @@ not yet exist.
 | Gap | Why it is not done |
 |---|---|
 | **CI runs no database.** The three `store` integration tests skip unless `TEST_DATABASE_URL` is set, and the workflow never sets it — so CI is green while the concurrency and payment logic is untested there. `make go-test-db` runs them locally against the compose Postgres. | About fifteen minutes: add a `postgres:15` service container and the env var. Deferred only because it was found in the same audit as the items above. |
-| **No handler or end-to-end Go tests.** Coverage is the `payments` package (7 tests) and the `store` package (3 integration tests). | The `scripts/smoke.sh` suite covers the routes end to end at the HTTP level, which is where the value was for the money; Go-level route tests were never the gap. |
+| **No handler or end-to-end Go tests.** Coverage is the `payments` package (7 tests) and the `store` package (3 integration tests). | The `tests/smoke/smoke.sh` suite (`make smoke`) covers the routes end to end at the HTTP level, which is where the value was for the money; Go-level route tests were never the gap. |
 | **No frontend tests.** | Deliberate. The frontend is a demonstration surface, and its correctness is checked by the browser walkthrough and by `npm run build` in CI. |
 
 ### Operations

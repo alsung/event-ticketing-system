@@ -1,4 +1,4 @@
-# Event Ticketing System
+# EventMaster / Event Ticketing System
 
 A full-stack event ticketing platform built as a distributed-systems study: four Go microservices
 behind an API gateway, PostgreSQL for durable state, Stripe for payments, and Kafka for asynchronous
